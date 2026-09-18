@@ -1,7 +1,6 @@
 # Warspear Online Bot v1.5
 
-Bot de automação para Warspear Online (cliente 32-bit). Funciona via memória do processo do jogo (ReadProcessMemory/WriteProcessMemory).
-
+Bot de automação para Warspear Online (cliente 32-bit). Funciona via memória do processo do jogo (ReadProcessMemory/WriteProcessMemory). Versão WINDOWS XP (janelinha pequena)
 ---
 
 ## Arquitetura
@@ -148,7 +147,7 @@ Corpos NÃO são entidades regulares na árvore. Quando um mob morre:
 ## Estrutura do Projeto
 
 ```
-warspear-botv1.5/
+WS-BOT/
 ├── controller/
 │   ├── main.cpp                ← Controlador GUI (~1030 linhas)
 │   ├── build.bat               ← Script de compilação
@@ -175,7 +174,7 @@ warspear-botv1.5/
 ### Compilar o Controller
 
 ```bat
-cd warspear-botv1.5\controller
+cd WS-BOT\controller
 build.bat
 ```
 

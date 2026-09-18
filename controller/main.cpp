@@ -43,6 +43,10 @@ namespace Game {
     constexpr DWORD OBJ_OBJECT_ID  = 0x120;
     constexpr DWORD OBJ_TYPE_ID    = 0x124;
     constexpr DWORD OBJ_LIFETIME   = 0x128;
+
+    // Game-to-screen coordinate mapping
+    // Warspear 2D top-down: player centered, game coords map linearly to screen pixels.
+    constexpr float G2S_SCALE = 10.0f;
 }
 
 struct EntityData {
@@ -420,6 +424,83 @@ void SendInputKey(WORD vk) {
     SendInput(2,in,sizeof(INPUT));
 }
 
+// Convert game coordinates to client-area coordinates
+// Returns false if game window not found
+bool GameToClient(float gx, float gy, int& cx, int& cy) {
+    HWND w = FindGameWindow();
+    if (!w) return false;
+    RECT rc;
+    GetClientRect(w, &rc);
+    int midX = (rc.right - rc.left) / 2;
+    int midY = (rc.bottom - rc.top) / 2;
+    float dx = gx - g_selfX;
+    float dy = gy - g_selfY;
+    cx = midX + (int)(dx * Game::G2S_SCALE);
+    cy = midY + (int)(dy * Game::G2S_SCALE);
+    if (cx < 5) cx = 5; if (cx > rc.right - 5) cx = rc.right - 5;
+    if (cy < 5) cy = 5; if (cy > rc.bottom - 5) cy = rc.bottom - 5;
+    return true;
+}
+
+// Move Windows mouse to client coords WITHOUT clicking (cursor hover only)
+void MoveToClient(int cx, int cy) {
+    HWND w = FindGameWindow();
+    if (!w) return;
+    POINT pt = { cx, cy };
+    ClientToScreen(w, &pt);
+    int sx = GetSystemMetrics(SM_CXSCREEN);
+    int sy = GetSystemMetrics(SM_CYSCREEN);
+    INPUT in = {};
+    in.type = INPUT_MOUSE;
+    in.mi.dx = (LONG)(pt.x * 65536.0 / sx);
+    in.mi.dy = (LONG)(pt.y * 65536.0 / sy);
+    in.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
+    SendInput(1, &in, sizeof(INPUT));
+}
+
+// Click once at empty ground to deselect any current target/selection
+void ClickGroundDeselect() {
+    HWND w = FindGameWindow();
+    if (!w || GetForegroundWindow() != w || IsIconic(w)) return;
+    RECT rc;
+    GetClientRect(w, &rc);
+    int gx = (rc.right - rc.left) / 2 + 60;
+    int gy = (rc.bottom - rc.top) / 2 + 60;
+    if (gx > rc.right - 10) gx = rc.right - 10;
+    if (gy > rc.bottom - 10) gy = rc.bottom - 10;
+    DebugLog("[DESEL] Click ground at client(%d,%d)", gx, gy);
+    ClickAtClient(gx, gy);
+}
+
+// Full attack sequence: deselect -> hover mob -> click mob
+void AttackMob(DWORD mobAddr, float mobGameX, float mobGameY) {
+    HWND gw = FindGameWindow();
+    if (!gw || GetForegroundWindow() != gw || IsIconic(gw)) return;
+
+    DebugLog("[ATTACK] mob addr=0x%08X game(%.1f,%.1f) self(%.1f,%.1f)",
+        mobAddr, mobGameX, mobGameY, g_selfX, g_selfY);
+
+    // Step 1: Click on ground to deselect any stale selection
+    ClickGroundDeselect();
+    Sleep(300);
+
+    // Step 2: Move mouse to mob's screen position (hover)
+    int mobCX, mobCY;
+    if (!GameToClient(mobGameX, mobGameY, mobCX, mobCY)) {
+        DebugLog("[ATTACK] GameToClient failed");
+        return;
+    }
+    DebugLog("[ATTACK] Hover mob at client(%d,%d)", mobCX, mobCY);
+    MoveToClient(mobCX, mobCY);
+
+    // Step 3: Wait for game to process cursor hover and show sword icon
+    Sleep(500);
+
+    // Step 4: Click on mob (game sees cursor over mob = attack)
+    DebugLog("[ATTACK] Click mob at client(%d,%d)", mobCX, mobCY);
+    ClickAtClient(mobCX, mobCY);
+}
+
 void FollowTarget() {
     if(g_followTargetAddr<=0x1000||!g_hProcess) return;
     SIZE_T r=0; int rx=0,ry=0;
@@ -433,21 +514,16 @@ void FollowTarget() {
 
     if(dist<1.0f) return;
 
-    // Select target in game (same as mob attack)
-    WriteGameTarget(g_followTargetAddr);
+    // Use GameToScreen for proper coordinate mapping
+    int targetCX, targetCY;
+    if (!GameToClient(tx, ty, targetCX, targetCY)) {
+        DebugLog("[FOLLOW] GameToClient failed");
+        return;
+    }
 
-    HWND w=FindGameWindow(); if(!w) return;
-    RECT rc; GetClientRect(w,&rc);
-    int cx=(rc.right-rc.left)/2, cy=(rc.bottom-rc.top)/2;
-
-    float cd=dist*0.6f; if(cd>15.0f) cd=15.0f;
-    int px=cx+(int)(dx/dist*cd*6.0f), py=cy+(int)(dy/dist*cd*6.0f);
-    if(px<10)px=10; if(px>rc.right-10)px=rc.right-10;
-    if(py<10)py=10; if(py>rc.bottom-10)py=rc.bottom-10;
-
-    DebugLog("[FOLLOW] click client=(%d,%d) cd=%.1f dir=(%.2f,%.2f)", px, py, cd, dx/dist, dy/dist);
-
-    ClickAtClient(px,py);
+    // Click toward the target position
+    DebugLog("[FOLLOW] click client=(%d,%d)", targetCX, targetCY);
+    ClickAtClient(targetCX, targetCY);
 }
 
 // ============================================================
@@ -1096,29 +1172,27 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam) {
             if(g_selectedTargetAddr>0x1000&&g_hProcess) {
                 DWORD hp=0; SIZE_T r=0;
                 ReadProcessMemory(g_hProcess,(LPCVOID)(g_selectedTargetAddr+Game::ENT_HP),&hp,4,&r);
-                DebugLog("[ATK] target=0x%08X hp=%d read=%d name=%S", g_selectedTargetAddr, hp, (int)r, g_selTargetName);
+                int rawX=0, rawY=0;
+                ReadProcessMemory(g_hProcess,(LPCVOID)(g_selectedTargetAddr+Game::ENT_RAW_X),&rawX,4,&r);
+                ReadProcessMemory(g_hProcess,(LPCVOID)(g_selectedTargetAddr+Game::ENT_RAW_Y),&rawY,4,&r);
+                float mobGX = rawX / 65536.0f;
+                float mobGY = rawY / 65536.0f;
+                DebugLog("[ATK] target=0x%08X hp=%d name=%S game(%.1f,%.1f)", g_selectedTargetAddr, hp, g_selTargetName, mobGX, mobGY);
                 if(hp>0) {
-                    DebugLog("[ATK] Writing target + sending enter attack...");
-                    WriteGameTarget(g_selectedTargetAddr);
-                    SendEnterAttack();
-                    DebugLog("[ATK] Attack sent!");
+                    // Mouse-based attack: click ground -> hover mob -> click mob
+                    AttackMob(g_selectedTargetAddr, mobGX, mobGY);
                 } else {
                     g_killCount++;
                     DebugLog("[ATK] Target dead! Kills=%d name=%S", g_killCount, g_selTargetName);
 
                     // Save corpse position for auto-loot
                     if(g_autoLoot) {
-                        SIZE_T r2=0; int rawX=0, rawY=0;
-                        ReadProcessMemory(g_hProcess,(LPCVOID)(g_selectedTargetAddr+Game::ENT_RAW_X),&rawX,4,&r2);
-                        ReadProcessMemory(g_hProcess,(LPCVOID)(g_selectedTargetAddr+Game::ENT_RAW_Y),&rawY,4,&r2);
-                        if(r2==4) {
-                            g_pendingCorpseX = rawX / 65536.0f;
-                            g_pendingCorpseY = rawY / 65536.0f;
-                            wcscpy_s(g_pendingCorpseName, g_selTargetName);
-                            g_pendingCorpseTime = GetTickCount();
-                            g_hasPendingCorpse = true;
-                            DebugLog("[LOOT] Saved corpse position: '%S' (%.1f, %.1f)", g_pendingCorpseName, g_pendingCorpseX, g_pendingCorpseY);
-                        }
+                        g_pendingCorpseX = mobGX;
+                        g_pendingCorpseY = mobGY;
+                        wcscpy_s(g_pendingCorpseName, g_selTargetName);
+                        g_pendingCorpseTime = GetTickCount();
+                        g_hasPendingCorpse = true;
+                        DebugLog("[LOOT] Saved corpse position: '%S' (%.1f, %.1f)", g_pendingCorpseName, g_pendingCorpseX, g_pendingCorpseY);
                     }
 
                     bool found=false;
@@ -1127,7 +1201,7 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam) {
                         if(hasFilter && wcsstr(m.name, filter)==NULL) continue;
                         DebugLog("[ATK] New target: %S (0x%08X) HP=%d/%d", m.name, m.objAddr, m.hp, m.maxHp);
                         g_selectedTargetAddr=m.objAddr;wcscpy_s(g_selTargetName,m.name);
-                        WriteGameTarget(m.objAddr);SendEnterAttack();found=true;break;
+                        AttackMob(m.objAddr, m.x, m.y);found=true;break;
                     }
                     if(!found) {
                         DebugLog("[ATK] No more mobs alive%s", hasFilter ? " matching filter" : "");
@@ -1166,63 +1240,43 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam) {
 
             // Priority 1: Use pending corpse (position saved when mob died)
             if(g_hasPendingCorpse) {
-                // Re-read position from dead mob address if still valid
                 float cx = g_pendingCorpseX, cy = g_pendingCorpseY;
-
                 float dx = cx - g_selfX;
                 float dy = cy - g_selfY;
                 float dist = sqrtf(dx*dx + dy*dy);
                 DWORD elapsed = GetTickCount() - g_pendingCorpseTime;
 
-                DebugLog("[LOOT] Pending '%S' dist=%.1f age=%ds", g_pendingCorpseName, dist, elapsed/1000);
+                DebugLog("[LOOT] Pending '%S' dist=%.1f age=%ds self=(%.1f,%.1f) corpse=(%.1f,%.1f)",
+                    g_pendingCorpseName, dist, elapsed/1000, g_selfX, g_selfY, cx, cy);
 
-                // Timeout: corpse too old (20 seconds), give up
                 if(elapsed > 20000) {
                     DebugLog("[LOOT] Corpse expired (20s timeout)");
                     g_hasPendingCorpse = false;
                 } else if(dist > 3.0f) {
-                    // FAR: Click FAR in the direction to walk fast
-                    RECT rc; GetClientRect(w,&rc);
-                    int mx = (rc.right-rc.left)/2;
-                    int my = (rc.bottom-rc.top)/2;
-                    // Click at screen edge in corpse direction (much more aggressive)
-                    float nx = dx/dist, ny = dy/dist;
-                    float halfW = (float)(rc.right-rc.left)/2.0f - 20.0f;
-                    float halfH = (float)(rc.bottom-rc.top)/2.0f - 20.0f;
-                    float scale = (halfW < halfH) ? halfW : halfH;
-                    int px = mx + (int)(nx * scale);
-                    int py = my + (int)(ny * scale);
-                    if(px<5)px=5; if(px>rc.right-5)px=rc.right-5;
-                    if(py<5)py=5; if(py>rc.bottom-5)py=rc.bottom-5;
-                    DebugLog("[LOOT] Walk: click (%d,%d) dir=(%.2f,%.2f) scale=%.0f", px, py, nx, ny, scale);
-                    ClickAtClient(px, py);
+                    // FAR: Use GameToClient to click toward corpse position
+                    int corpseCX, corpseCY;
+                    if (GameToClient(cx, cy, corpseCX, corpseCY)) {
+                        DebugLog("[LOOT] Walk to corpse: game(%.1f,%.1f) -> client(%d,%d) dist=%.1f", cx, cy, corpseCX, corpseCY, dist);
+                        ClickAtClient(corpseCX, corpseCY);
+                    }
                 } else {
                     // CLOSE: Click on corpse + Enter to Take All
-                    RECT rc; GetClientRect(w,&rc);
-                    int mx = (rc.right-rc.left)/2;
-                    int my = (rc.bottom-rc.top)/2;
-                    // Use bigger scale for clicking on corpse directly
-                    float nx = (dist > 0.1f) ? dx/dist : 0;
-                    float ny = (dist > 0.1f) ? dy/dist : 0;
-                    float clickDist = (dist > 0.5f) ? dist * 20.0f : 30.0f;
-                    int px = mx + (int)(nx * clickDist);
-                    int py = my + (int)(ny * clickDist);
-                    if(px<5)px=5; if(px>rc.right-5)px=rc.right-5;
-                    if(py<5)py=5; if(py>rc.bottom-5)py=rc.bottom-5;
-                    DebugLog("[LOOT] Click corpse at (%d,%d) dist=%.1f", px, py, dist);
-                    ClickAtClient(px, py);
-                    Sleep(400);
-                    // Check if loot window opened by trying Enter twice
-                    SendInputKey(VK_RETURN);
-                    Sleep(300);
-                    SendInputKey(VK_RETURN);
-                    Sleep(200);
-                    g_lootCount++;
-                    g_lootClickCount++;
-                    wcscpy_s(g_lastLootName, g_pendingCorpseName);
-                    g_lastLootTime = GetTickCount();
-                    DebugLog("[LOOT] Looted! #%d '%S' | Total: %d loots / %d kills",
-                        g_lootClickCount, g_pendingCorpseName, g_lootCount, g_killCount);
+                    int corpseCX, corpseCY;
+                    if (GameToClient(cx, cy, corpseCX, corpseCY)) {
+                        DebugLog("[LOOT] Loot corpse at: game(%.1f,%.1f) -> client(%d,%d) dist=%.1f", cx, cy, corpseCX, corpseCY, dist);
+                        ClickAtClient(corpseCX, corpseCY);
+                        Sleep(400);
+                        SendInputKey(VK_RETURN);
+                        Sleep(300);
+                        SendInputKey(VK_RETURN);
+                        Sleep(200);
+                        g_lootCount++;
+                        g_lootClickCount++;
+                        wcscpy_s(g_lastLootName, g_pendingCorpseName);
+                        g_lastLootTime = GetTickCount();
+                        DebugLog("[LOOT] Looted! #%d '%S' | Total: %d loots / %d kills",
+                            g_lootClickCount, g_pendingCorpseName, g_lootCount, g_killCount);
+                    }
                     g_hasPendingCorpse = false;
                 }
                 break;
@@ -1235,43 +1289,27 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam) {
                 float dy = c.y - g_selfY;
                 float dist = sqrtf(dx*dx + dy*dy);
 
-                DebugLog("[LOOT] Tree corpse '%S' dist=%.1f", c.name, dist);
+                DebugLog("[LOOT] Tree corpse '%S' dist=%.1f game(%.1f,%.1f)", c.name, dist, c.x, c.y);
 
-                if(dist > 3.0f) {
-                    RECT rc; GetClientRect(w,&rc);
-                    int mx = (rc.right-rc.left)/2;
-                    int my = (rc.bottom-rc.top)/2;
-                    float nx = dx/dist, ny = dy/dist;
-                    float halfW = (float)(rc.right-rc.left)/2.0f - 20.0f;
-                    float halfH = (float)(rc.bottom-rc.top)/2.0f - 20.0f;
-                    float scale = (halfW < halfH) ? halfW : halfH;
-                    int px = mx + (int)(nx * scale);
-                    int py = my + (int)(ny * scale);
-                    if(px<5)px=5; if(px>rc.right-5)px=rc.right-5;
-                    if(py<5)py=5; if(py>rc.bottom-5)py=rc.bottom-5;
-                    ClickAtClient(px, py);
-                } else {
-                    RECT rc; GetClientRect(w,&rc);
-                    int mx = (rc.right-rc.left)/2;
-                    int my = (rc.bottom-rc.top)/2;
-                    float nx = (dist > 0.1f) ? dx/dist : 0;
-                    float ny = (dist > 0.1f) ? dy/dist : 0;
-                    float clickDist = (dist > 0.5f) ? dist * 20.0f : 30.0f;
-                    int px = mx + (int)(nx * clickDist);
-                    int py = my + (int)(ny * clickDist);
-                    if(px<5)px=5; if(px>rc.right-5)px=rc.right-5;
-                    if(py<5)py=5; if(py>rc.bottom-5)py=rc.bottom-5;
-                    ClickAtClient(px, py);
-                    Sleep(400);
-                    SendInputKey(VK_RETURN);
-                    Sleep(300);
-                    SendInputKey(VK_RETURN);
-                    Sleep(200);
-                    g_lootCount++;
-                    g_lootClickCount++;
-                    wcscpy_s(g_lastLootName, c.name);
-                    g_lastLootTime = GetTickCount();
-                    DebugLog("[LOOT] Looted tree corpse! #%d '%S'", g_lootClickCount, c.name);
+                int corpseCX, corpseCY;
+                if (GameToClient(c.x, c.y, corpseCX, corpseCY)) {
+                    if(dist > 3.0f) {
+                        DebugLog("[LOOT] Walk to tree corpse: client(%d,%d)", corpseCX, corpseCY);
+                        ClickAtClient(corpseCX, corpseCY);
+                    } else {
+                        DebugLog("[LOOT] Loot tree corpse: client(%d,%d)", corpseCX, corpseCY);
+                        ClickAtClient(corpseCX, corpseCY);
+                        Sleep(400);
+                        SendInputKey(VK_RETURN);
+                        Sleep(300);
+                        SendInputKey(VK_RETURN);
+                        Sleep(200);
+                        g_lootCount++;
+                        g_lootClickCount++;
+                        wcscpy_s(g_lastLootName, c.name);
+                        g_lastLootTime = GetTickCount();
+                        DebugLog("[LOOT] Looted tree corpse! #%d '%S'", g_lootClickCount, c.name);
+                    }
                 }
             }
         }

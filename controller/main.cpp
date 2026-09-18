@@ -226,6 +226,13 @@ static bool g_dllInjected=false;
 static wchar_t g_attackMobFilter[64]={};
 static bool g_autoLoot=false;
 
+// Stats
+static int g_killCount=0;
+static int g_lootCount=0;
+static int g_lootClickCount=0;
+static wchar_t g_lastLootName[64]={};
+static DWORD g_lastLootTime=0;
+
 // Shared memory with DLL
 struct BotCmd {
     volatile long attackOn;
@@ -396,6 +403,16 @@ void ClickAtClient(int cx, int cy) {
     SendInput(3,in,sizeof(INPUT));
 }
 
+void SendInputKey(WORD vk) {
+    INPUT in[2]={};
+    in[0].type=INPUT_KEYBOARD;
+    in[0].ki.wVk=vk;
+    in[1].type=INPUT_KEYBOARD;
+    in[1].ki.wVk=vk;
+    in[1].ki.dwFlags=KEYEVENTF_KEYUP;
+    SendInput(2,in,sizeof(INPUT));
+}
+
 void FollowTarget() {
     if(g_followTargetAddr<=0x1000||!g_hProcess) return;
     SIZE_T r=0; int rx=0,ry=0;
@@ -552,8 +569,13 @@ void UpdateUI() {
     g_selfX=sx; g_selfY=sy;
     g_cachedCorpses=corpses;
     wchar_t buf[512];
-    swprintf_s(buf,L"  %s  |  Lv.%d %s  |  HP: %d/%d  |  Mana: %d/%d  |  Players: %d  Mobs: %d  NPCs: %d  Corpses: %d",
-        name.c_str(),level,GetClassName(classId),hp,mhp,mn,mmn,(int)pl.size(),(int)mb.size(),(int)np.size(),(int)corpses.size());
+    if(g_killCount>0 || g_lootCount>0) {
+        swprintf_s(buf,L"  %s | Lv.%d %s | HP: %d/%d | Kills: %d | Loots: %d | Corpses: %d",
+            name.c_str(),level,GetClassName(classId),hp,mhp,g_killCount,g_lootCount,(int)corpses.size());
+    } else {
+        swprintf_s(buf,L"  %s  |  Lv.%d %s  |  HP: %d/%d  |  Mana: %d/%d  |  Players: %d  Mobs: %d  NPCs: %d  Corpses: %d",
+            name.c_str(),level,GetClassName(classId),hp,mhp,mn,mmn,(int)pl.size(),(int)mb.size(),(int)np.size(),(int)corpses.size());
+    }
     SetWindowTextW(g_hStatus,buf);
 
     g_cachedPlayers=pl;
@@ -587,6 +609,21 @@ void UpdateUI() {
     }
 
     g_cachedMobs=mb;
+
+    // Periodic stats summary every 30 seconds
+    static int statsTimer=0;
+    statsTimer++;
+    if(statsTimer >= 60 && (g_killCount > 0 || g_lootCount > 0)) {
+        statsTimer = 0;
+        DWORD elapsed = (GetTickCount() - g_lastLootTime) / 1000;
+        DebugLog("[STATS] ====================================");
+        DebugLog("[STATS] Kills: %d  |  Loots: %d  |  Ratio: %s",
+            g_killCount, g_lootCount,
+            g_killCount > 0 ? "" : "N/A");
+        DebugLog("[STATS] Last loot: '%S' (%d sec ago)", g_lastLootName, elapsed);
+        DebugLog("[STATS] Corpses nearby: %d", (int)corpses.size());
+        DebugLog("[STATS] ====================================");
+    }
     // Only rebuild mob list if data changed
     static std::vector<EntityData> prevMobs;
     bool mobsChanged = (mb.size() != prevMobs.size());
@@ -922,9 +959,17 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam) {
                 SendMessage(g_hChkFollow,BM_SETCHECK,BST_UNCHECKED,0);
                 SendMessage(g_hChkLoot,BM_SETCHECK,BST_UNCHECKED,0);
                 g_selectedTargetAddr=0; g_followTargetAddr=0; g_autoLoot=false;
-                if(g_pBotCmd){g_pBotCmd->attackOn=0;g_pBotCmd->followOn=0;g_pBotCmd->targetAddr=0;g_pBotCmd->followAddr=0;}
+                wcscpy_s(g_selTargetName,L""); wcscpy_s(g_followName,L"");
+                if(g_pBotCmd){
+                    g_pBotCmd->attackOn=0;g_pBotCmd->followOn=0;
+                    g_pBotCmd->targetAddr=0;g_pBotCmd->followAddr=0;
+                    g_pBotCmd->healOn=0;
+                }
                 SetWindowTextW(g_hStatus,L"  [F2] ALL STOPPED");
+                DebugLog("[F2] ====================================");
                 DebugLog("[F2] PANIC STOP - all timers killed");
+                DebugLog("[F2] Stats: Kills=%d Loots=%d", g_killCount, g_lootCount);
+                DebugLog("[F2] ====================================");
             }
 
             // F1 toggle: only act on press transition (release->press)
@@ -1009,7 +1054,9 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam) {
         }
 
         if(wParam==2) { // Attack
-            // Read mob name filter from UI
+            HWND gw = FindGameWindow();
+            if(!gw || GetForegroundWindow()!=gw || IsIconic(gw)) break;
+
             wchar_t filter[64]={};
             GetWindowTextW(g_hAtkName, filter, 64);
             bool hasFilter = (filter[0] != 0);
@@ -1024,7 +1071,8 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam) {
                     SendEnterAttack();
                     DebugLog("[ATK] Attack sent!");
                 } else {
-                    DebugLog("[ATK] Target dead, searching for new mob...");
+                    g_killCount++;
+                    DebugLog("[ATK] Target dead! Kills=%d name=%S", g_killCount, g_selTargetName);
                     bool found=false;
                     for(auto&m:g_cachedMobs){
                         if(m.hp<=0||IsNPC(m.name)||m.objAddr==g_selectedTargetAddr) continue;
@@ -1042,6 +1090,9 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam) {
         }
 
         if(wParam==3) { // Follow
+            HWND gw = FindGameWindow();
+            if(!gw || GetForegroundWindow()!=gw || IsIconic(gw)) break;
+
             if(g_followTargetAddr>0x1000&&g_hProcess) {
                 SIZE_T r=0; int rx=0,ry=0;
                 ReadProcessMemory(g_hProcess,(LPCVOID)(g_followTargetAddr+Game::ENT_RAW_X),&rx,4,&r);
@@ -1062,29 +1113,50 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam) {
 
         if(wParam==4) { // Auto Loot
             if(g_autoLoot && g_hProcess && !g_cachedCorpses.empty()) {
-                DebugLog("[LOOT] Found %d corpses nearby", (int)g_cachedCorpses.size());
                 auto& c = g_cachedCorpses[0];
-                DebugLog("[LOOT] Clicking corpse: %S at (%.1f,%.1f) dist=%.1f objId=%d typeId=%d",
-                    c.name, c.x, c.y, c.distance, c.objectId, c.typeId);
-
-                // Click on corpse position in game world to trigger loot interaction
                 HWND w=FindGameWindow();
-                if(w) {
+                if(!w || GetForegroundWindow()!=w || IsIconic(w)) { break; }
+
+                float dx = c.x - g_selfX;
+                float dy = c.y - g_selfY;
+                float dist = sqrtf(dx*dx + dy*dy);
+
+                DebugLog("[LOOT] '%S' dist=%.1f corpse=(%.1f,%.1f) self=(%.1f,%.1f)",
+                    c.name, dist, c.x, c.y, g_selfX, g_selfY);
+
+                if(dist > 2.0f) {
+                    // FAR: Walk toward corpse
                     RECT rc; GetClientRect(w,&rc);
-                    float dx = c.x - g_selfX;
-                    float dy = c.y - g_selfY;
-                    float dist = sqrtf(dx*dx + dy*dy);
-                    if(dist > 0.1f) {
-                        int cx = (rc.right-rc.left)/2;
-                        int cy = (rc.bottom-rc.top)/2;
-                        float cd = dist * 0.6f; if(cd > 15.0f) cd = 15.0f;
-                        int px = cx + (int)(dx/dist * cd * 6.0f);
-                        int py = cy + (int)(dy/dist * cd * 6.0f);
-                        if(px<10)px=10; if(px>rc.right-10)px=rc.right-10;
-                        if(py<10)py=10; if(py>rc.bottom-10)py=rc.bottom-10;
-                        DebugLog("[LOOT] Click at client=(%d,%d)", px, py);
-                        ClickAtClient(px, py);
-                    }
+                    int cx = (rc.right-rc.left)/2;
+                    int cy = (rc.bottom-rc.top)/2;
+                    float cd = dist * 0.6f; if(cd > 15.0f) cd = 15.0f;
+                    int px = cx + (int)(dx/dist * cd * 6.0f);
+                    int py = cy + (int)(dy/dist * cd * 6.0f);
+                    if(px<10)px=10; if(px>rc.right-10)px=rc.right-10;
+                    if(py<10)py=10; if(py>rc.bottom-10)py=rc.bottom-10;
+                    DebugLog("[LOOT] Walking to corpse: click (%d,%d)", px, py);
+                    ClickAtClient(px, py);
+                } else {
+                    // CLOSE: Click directly on corpse to open loot, then Enter to Take All
+                    RECT rc; GetClientRect(w,&rc);
+                    int cx = (rc.right-rc.left)/2;
+                    int cy = (rc.bottom-rc.top)/2;
+                    int px = cx + (int)(dx * 20.0f);
+                    int py = cy + (int)(dy * 20.0f);
+                    if(px<10)px=10; if(px>rc.right-10)px=rc.right-10;
+                    if(py<10)py=10; if(py>rc.bottom-10)py=rc.bottom-10;
+                    DebugLog("[LOOT] Clicking corpse at client=(%d,%d)", px, py);
+                    ClickAtClient(px, py);
+                    Sleep(300);
+                    // Press Enter to confirm loot / Take All
+                    SendInputKey(VK_RETURN);
+                    Sleep(200);
+                    g_lootCount++;
+                    g_lootClickCount++;
+                    wcscpy_s(g_lastLootName, c.name);
+                    g_lastLootTime = GetTickCount();
+                    DebugLog("[LOOT] Looted! #%d '%S' | Total loots: %d | Kills: %d | Loot/Kill: %d/%d",
+                        g_lootClickCount, c.name, g_lootCount, g_killCount, g_lootCount, g_killCount);
                 }
             }
         }

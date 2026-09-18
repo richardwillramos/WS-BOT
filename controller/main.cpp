@@ -544,8 +544,8 @@ void UpdateUI() {
     g_selfX=sx; g_selfY=sy;
     g_cachedCorpses=corpses;
     wchar_t buf[512];
-    swprintf_s(buf,L"  %s  |  HP: %d/%d  |  Mana: %d/%d  |  Players: %d  Mobs: %d  NPCs: %d  Corpses: %d",
-        name.c_str(),hp,mhp,mn,mmn,(int)pl.size(),(int)mb.size(),(int)np.size(),(int)corpses.size());
+    swprintf_s(buf,L"  %s  |  Lv.%d %s  |  HP: %d/%d  |  Mana: %d/%d  |  Players: %d  Mobs: %d  NPCs: %d  Corpses: %d",
+        name.c_str(),level,GetClassName(classId),hp,mhp,mn,mmn,(int)pl.size(),(int)mb.size(),(int)np.size(),(int)corpses.size());
     SetWindowTextW(g_hStatus,buf);
 
     g_cachedPlayers=pl;

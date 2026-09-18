@@ -217,6 +217,7 @@ static HWND g_hNpcList;
 // State
 static DWORD g_selectedTargetAddr=0; static wchar_t g_selTargetName[64]={};
 static std::vector<EntityData> g_cachedMobs;
+static std::vector<EntityData> g_prevMobs;  // Previous frame mobs for death detection
 static DWORD g_followTargetAddr=0; static wchar_t g_followName[64]={};
 static std::vector<EntityData> g_cachedPlayers;
 static std::vector<CorpseData> g_cachedCorpses;
@@ -225,6 +226,12 @@ static bool g_connected=false;
 static bool g_dllInjected=false;
 static wchar_t g_attackMobFilter[64]={};
 static bool g_autoLoot=false;
+
+// Pending corpse (position saved when mob dies, used by loot timer)
+static bool g_hasPendingCorpse=false;
+static float g_pendingCorpseX=0, g_pendingCorpseY=0;
+static wchar_t g_pendingCorpseName[64]={};
+static DWORD g_pendingCorpseTime=0;
 
 // Stats
 static int g_killCount=0;
@@ -650,6 +657,26 @@ void UpdateUI() {
         }
         if (prevSel != LB_ERR) SendMessageW(g_hMobList, LB_SETCURSEL, newSel, 0);
         prevMobs = mb;
+
+        // Death detection: mobs that disappeared from tree = likely killed manually
+        if(g_autoLoot && !g_hasPendingCorpse && !g_prevMobs.empty()) {
+            for(auto& prev : g_prevMobs) {
+                if(prev.hp <= 0) continue;
+                bool stillAlive = false;
+                for(auto& cur : mb) {
+                    if(cur.objAddr == prev.objAddr) { stillAlive = true; break; }
+                }
+                if(!stillAlive) {
+                    g_pendingCorpseX = prev.x;
+                    g_pendingCorpseY = prev.y;
+                    wcscpy_s(g_pendingCorpseName, prev.name);
+                    g_pendingCorpseTime = GetTickCount();
+                    g_hasPendingCorpse = true;
+                    DebugLog("[DEATH] Mob disappeared: '%S' (%.1f,%.1f) - saving corpse pos for loot", prev.name, prev.x, prev.y);
+                }
+            }
+        }
+        g_prevMobs = mb;
     }
 
     if(g_selectedTargetAddr>0x1000){
@@ -1073,6 +1100,22 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam) {
                 } else {
                     g_killCount++;
                     DebugLog("[ATK] Target dead! Kills=%d name=%S", g_killCount, g_selTargetName);
+
+                    // Save corpse position for auto-loot
+                    if(g_autoLoot) {
+                        SIZE_T r2=0; int rawX=0, rawY=0;
+                        ReadProcessMemory(g_hProcess,(LPCVOID)(g_selectedTargetAddr+Game::ENT_RAW_X),&rawX,4,&r2);
+                        ReadProcessMemory(g_hProcess,(LPCVOID)(g_selectedTargetAddr+Game::ENT_RAW_Y),&rawY,4,&r2);
+                        if(r2==4) {
+                            g_pendingCorpseX = rawX / 65536.0f;
+                            g_pendingCorpseY = rawY / 65536.0f;
+                            wcscpy_s(g_pendingCorpseName, g_selTargetName);
+                            g_pendingCorpseTime = GetTickCount();
+                            g_hasPendingCorpse = true;
+                            DebugLog("[LOOT] Saved corpse position: '%S' (%.1f, %.1f)", g_pendingCorpseName, g_pendingCorpseX, g_pendingCorpseY);
+                        }
+                    }
+
                     bool found=false;
                     for(auto&m:g_cachedMobs){
                         if(m.hp<=0||IsNPC(m.name)||m.objAddr==g_selectedTargetAddr) continue;
@@ -1112,19 +1155,24 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam) {
         }
 
         if(wParam==4) { // Auto Loot
-            if(g_autoLoot && g_hProcess && !g_cachedCorpses.empty()) {
-                auto& c = g_cachedCorpses[0];
-                HWND w=FindGameWindow();
-                if(!w || GetForegroundWindow()!=w || IsIconic(w)) { break; }
+            if(!g_autoLoot || !g_hProcess) break;
+            HWND w=FindGameWindow();
+            if(!w || GetForegroundWindow()!=w || IsIconic(w)) { break; }
 
-                float dx = c.x - g_selfX;
-                float dy = c.y - g_selfY;
+            // Priority 1: Use pending corpse (position saved by attack timer)
+            if(g_hasPendingCorpse) {
+                float dx = g_pendingCorpseX - g_selfX;
+                float dy = g_pendingCorpseY - g_selfY;
                 float dist = sqrtf(dx*dx + dy*dy);
+                DWORD elapsed = GetTickCount() - g_pendingCorpseTime;
 
-                DebugLog("[LOOT] '%S' dist=%.1f corpse=(%.1f,%.1f) self=(%.1f,%.1f)",
-                    c.name, dist, c.x, c.y, g_selfX, g_selfY);
+                DebugLog("[LOOT] Pending corpse '%S' dist=%.1f age=%dms", g_pendingCorpseName, dist, elapsed);
 
-                if(dist > 2.0f) {
+                // Timeout: corpse too old (10 seconds), give up
+                if(elapsed > 10000) {
+                    DebugLog("[LOOT] Corpse expired (10s timeout)");
+                    g_hasPendingCorpse = false;
+                } else if(dist > 2.0f) {
                     // FAR: Walk toward corpse
                     RECT rc; GetClientRect(w,&rc);
                     int cx = (rc.right-rc.left)/2;
@@ -1137,7 +1185,7 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam) {
                     DebugLog("[LOOT] Walking to corpse: click (%d,%d)", px, py);
                     ClickAtClient(px, py);
                 } else {
-                    // CLOSE: Click directly on corpse to open loot, then Enter to Take All
+                    // CLOSE: Click on corpse + Enter to Take All
                     RECT rc; GetClientRect(w,&rc);
                     int cx = (rc.right-rc.left)/2;
                     int cy = (rc.bottom-rc.top)/2;
@@ -1148,15 +1196,58 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam) {
                     DebugLog("[LOOT] Clicking corpse at client=(%d,%d)", px, py);
                     ClickAtClient(px, py);
                     Sleep(300);
-                    // Press Enter to confirm loot / Take All
+                    SendInputKey(VK_RETURN);
+                    Sleep(200);
+                    g_lootCount++;
+                    g_lootClickCount++;
+                    wcscpy_s(g_lastLootName, g_pendingCorpseName);
+                    g_lastLootTime = GetTickCount();
+                    DebugLog("[LOOT] Looted! #%d '%S' | Total loots: %d | Kills: %d",
+                        g_lootClickCount, g_pendingCorpseName, g_lootCount, g_killCount);
+                    g_hasPendingCorpse = false;
+                }
+                break;
+            }
+
+            // Priority 2: Use cached corpses from entity tree (legacy, may not find any)
+            if(!g_cachedCorpses.empty()) {
+                auto& c = g_cachedCorpses[0];
+                float dx = c.x - g_selfX;
+                float dy = c.y - g_selfY;
+                float dist = sqrtf(dx*dx + dy*dy);
+
+                DebugLog("[LOOT] Tree corpse '%S' dist=%.1f", c.name, dist);
+
+                if(dist > 2.0f) {
+                    RECT rc; GetClientRect(w,&rc);
+                    int cx = (rc.right-rc.left)/2;
+                    int cy = (rc.bottom-rc.top)/2;
+                    float cd = dist * 0.6f; if(cd > 15.0f) cd = 15.0f;
+                    int px = cx + (int)(dx/dist * cd * 6.0f);
+                    int py = cy + (int)(dy/dist * cd * 6.0f);
+                    if(px<10)px=10; if(px>rc.right-10)px=rc.right-10;
+                    if(py<10)py=10; if(py>rc.bottom-10)py=rc.bottom-10;
+                    DebugLog("[LOOT] Walking to corpse: click (%d,%d)", px, py);
+                    ClickAtClient(px, py);
+                } else {
+                    RECT rc; GetClientRect(w,&rc);
+                    int cx = (rc.right-rc.left)/2;
+                    int cy = (rc.bottom-rc.top)/2;
+                    int px = cx + (int)(dx * 20.0f);
+                    int py = cy + (int)(dy * 20.0f);
+                    if(px<10)px=10; if(px>rc.right-10)px=rc.right-10;
+                    if(py<10)py=10; if(py>rc.bottom-10)py=rc.bottom-10;
+                    DebugLog("[LOOT] Clicking corpse at client=(%d,%d)", px, py);
+                    ClickAtClient(px, py);
+                    Sleep(300);
                     SendInputKey(VK_RETURN);
                     Sleep(200);
                     g_lootCount++;
                     g_lootClickCount++;
                     wcscpy_s(g_lastLootName, c.name);
                     g_lastLootTime = GetTickCount();
-                    DebugLog("[LOOT] Looted! #%d '%S' | Total loots: %d | Kills: %d | Loot/Kill: %d/%d",
-                        g_lootClickCount, c.name, g_lootCount, g_killCount, g_lootCount, g_killCount);
+                    DebugLog("[LOOT] Looted! #%d '%S' | Total loots: %d | Kills: %d",
+                        g_lootClickCount, c.name, g_lootCount, g_killCount);
                 }
             }
         }

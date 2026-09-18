@@ -21,7 +21,7 @@ void Log(const char* msg) {
     OutputDebugStringA(msg);
     if (g_logFile == INVALID_HANDLE_VALUE) {
         g_logFile = CreateFileA(
-            "C:\\Users\\Admin\\Documents\\Default Project\\warspear-bot\\bot_log.txt",
+            "C:\\Users\\Admin\\Documents\\warspear-botv1.5\\bot_log.txt",
             GENERIC_WRITE, FILE_SHARE_READ|FILE_SHARE_WRITE,
             NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     }
@@ -89,6 +89,14 @@ DWORD WINAPI BotThread(LPVOID) {
     wsprintfA(buf, "[INIT] hwnd=%08X", (DWORD)hw);
     Log(buf);
 
+    // Get real window rect to calculate center dynamically
+    RECT winRect;
+    GetWindowRect(hw, &winRect);
+    int windowCenterX = (winRect.left + winRect.right) / 2;
+    int windowCenterY = (winRect.top + winRect.bottom) / 2;
+    wsprintfA(buf, "[INIT] windowCenter=(%d,%d)", windowCenterX, windowCenterY);
+    Log(buf);
+
     int count = 0;
     int tabCount = 0;
     bool targetLocked = false;
@@ -126,24 +134,19 @@ DWORD WINAPI BotThread(LPVOID) {
                         float dxNorm = dx / dist;
                         float dyNorm = dy / dist;
 
-                        int sx = 336 + (int)(dxNorm * followDistance * 20.0f);
-                        int sy = 260 + (int)(dyNorm * followDistance * 20.0f);
+                        // Use dynamic center from window rect instead of hardcoded 336, 260
+                        int sx = windowCenterX + (int)(dxNorm * followDistance * 20.0f);
+                        int sy = windowCenterY + (int)(dyNorm * followDistance * 20.0f);
 
-                        // Clamp to screen bounds
-                        if (sx < 20) sx = 20; if (sx > 652) sx = 652;
-                        if (sy < 20) sy = 20; if (sy > 500) sy = 500;
+                        // Clamp to screen bounds (within window)
+                        int winWidth = winRect.right - winRect.left;
+                        int winHeight = winRect.bottom - winRect.top;
+                        if (sx < 20) sx = 20; if (sx > winWidth - 20) sx = winWidth - 20;
+                        if (sy < 20) sy = 20; if (sy > winHeight - 20) sy = winHeight - 20;
 
-                        // Only click if game window is not minimized and coordinates are valid
+                        // Only click if game window is not minimized
                         if (!IsIconic(hw)) {
-                            RECT rect;
-                            if (GetWindowRect(hw, &rect)) {
-                                int width = rect.right - rect.left;
-                                int height = rect.bottom - rect.top;
-                                // Additional safety: ensure click is within reasonable game area
-                                if (sx >= 0 && sx <= width && sy >= 0 && sy <= height) {
-                                    ClickAt(hw, sx, sy);
-                                }
-                            }
+                            ClickAt(hw, sx, sy);
                         }
                     }
                     // If we're closer than or equal to followDistance, do nothing (let character stop)

@@ -164,10 +164,11 @@ bool ReadGameState(float& sx, float& sy, int& hp, int& mhp, int& mn, int& mmn,
                    std::wstring& name, int& level, int& classId,
                    std::vector<EntityData>& pl,
                    std::vector<EntityData>& mb, std::vector<EntityData>& np,
-                   std::vector<CorpseData>& corpses, DWORD* outPlayerAddr=nullptr) {
+                   std::vector<CorpseData>& corpses, DWORD* outPlayerAddr=nullptr, DWORD* outGM=nullptr) {
     pl.clear(); mb.clear(); np.clear(); corpses.clear();
     DWORD gmPtr=Read<DWORD>(Game::GM_PTR); if(gmPtr<=0x1000) return false;
     DWORD gm=Read<DWORD>(gmPtr+Game::GM_OFFSET); if(gm<=0x1000) return false;
+    if(outGM) *outGM = gm;
     DWORD lp=Read<DWORD>(gm+Game::LP_OFFSET); if(lp<=0x1000) return false;
     if(outPlayerAddr) *outPlayerAddr = lp;
     sx=Read<int>(lp+Game::ENT_RAW_X)/65536.0f; sy=Read<int>(lp+Game::ENT_RAW_Y)/65536.0f;
@@ -674,38 +675,25 @@ void UpdateUI() {
     float sx,sy; int hp,mhp,mn,mmn; std::wstring name; int level=0, classId=0;
     std::vector<EntityData> pl,mb,np;
     std::vector<CorpseData> corpses;
-    DWORD playerAddr=0;
-    if(!ReadGameState(sx,sy,hp,mhp,mn,mmn,name,level,classId,pl,mb,np,corpses,&playerAddr)){
+    DWORD playerAddr=0, gmAddr=0;
+    if(!ReadGameState(sx,sy,hp,mhp,mn,mmn,name,level,classId,pl,mb,np,corpses,&playerAddr,&gmAddr)){
         SetWindowTextW(g_hStatus,L"  Cannot read game memory"); g_connected=false; return;
     }
     g_selfX=sx; g_selfY=sy;
     g_cachedCorpses=corpses;
 
-    // Dump GM (game manager) structure to find camera/viewport data
+    // One-shot GM dump to find camera/viewport
     static bool didGMDump = false;
-    if(!didGMDump && gm > 0x1000) {
+    if(!didGMDump && gmAddr > 0x1000) {
         didGMDump = true;
-        DebugLog("[GMDUMP] GM at 0x%08X", gm);
+        DebugLog("[GMDUMP] GM at 0x%08X player(%.1f,%.1f)", gmAddr, sx, sy);
         for(DWORD off = 0; off < 0x200; off += 4) {
-            int val = Read<int>(gm + off);
+            int val = Read<int>(gmAddr + off);
             DebugLog("[GMDUMP] +0x%03X = %d (0x%08X)", off, val, val);
         }
         DebugLog("[GMDUMP] === END ===");
     }
 
-    // Dump player entity memory to find screen coordinates
-    static float lastSX=0, lastSY=0;
-    if(playerAddr > 0x1000 && (sx != lastSX || sy != lastSY)) {
-        lastSX = sx; lastSY = sy;
-        DebugLog("[MEMDUMP] Player at 0x%08X game(%.1f,%.1f)", playerAddr, sx, sy);
-        for(DWORD off = 0; off < 0x800; off += 4) {
-            int val = Read<int>(playerAddr + off);
-            if(val != 0) {
-                DebugLog("[MEMDUMP] +0x%03X = %d (0x%08X)", off, val, val);
-            }
-        }
-        DebugLog("[MEMDUMP] === END ===");
-    }
     wchar_t buf[512];
     if(g_killCount>0 || g_lootCount>0) {
         swprintf_s(buf,L"  %s | Lv.%d %s | HP: %d/%d | Kills: %d | Loots: %d | Corpses: %d",

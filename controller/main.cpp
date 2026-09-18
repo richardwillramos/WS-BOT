@@ -164,11 +164,12 @@ bool ReadGameState(float& sx, float& sy, int& hp, int& mhp, int& mn, int& mmn,
                    std::wstring& name, int& level, int& classId,
                    std::vector<EntityData>& pl,
                    std::vector<EntityData>& mb, std::vector<EntityData>& np,
-                   std::vector<CorpseData>& corpses) {
+                   std::vector<CorpseData>& corpses, DWORD* outPlayerAddr=nullptr) {
     pl.clear(); mb.clear(); np.clear(); corpses.clear();
     DWORD gmPtr=Read<DWORD>(Game::GM_PTR); if(gmPtr<=0x1000) return false;
     DWORD gm=Read<DWORD>(gmPtr+Game::GM_OFFSET); if(gm<=0x1000) return false;
     DWORD lp=Read<DWORD>(gm+Game::LP_OFFSET); if(lp<=0x1000) return false;
+    if(outPlayerAddr) *outPlayerAddr = lp;
     sx=Read<int>(lp+Game::ENT_RAW_X)/65536.0f; sy=Read<int>(lp+Game::ENT_RAW_Y)/65536.0f;
     hp=Read<int>(lp+Game::ENT_HP); mhp=Read<int>(lp+Game::ENT_MAX_HP);
     mn=Read<int>(lp+Game::ENT_MANA); mmn=Read<int>(lp+Game::ENT_MAX_MANA);
@@ -177,6 +178,7 @@ bool ReadGameState(float& sx, float& sy, int& hp, int& mhp, int& mn, int& mmn,
     DWORD np2=Read<DWORD>(lp+Game::ENT_NAME_PTR); int nl=Read<int>(lp+Game::ENT_NAME_LEN);
     if(nl>0&&nl<64&&np2>0x1000){wchar_t w[64]={};for(int i=0;i<nl;i++){wchar_t c=Read<wchar_t>(np2+i*2);if(c==0)break;w[i]=c;}name=w;}
     else name=L"(unknown)";
+
     DWORD th=Read<DWORD>(gm+Game::ENTITY_TREE); if(th<=0x1000) return false;
     DWORD root=Read<DWORD>(th+Game::TH_ROOT);
     std::vector<EntityData> all;
@@ -230,6 +232,7 @@ static bool g_autoLoot=false;
 // Pending corpse (position saved when mob dies, used by loot timer)
 static bool g_hasPendingCorpse=false;
 static float g_pendingCorpseX=0, g_pendingCorpseY=0;
+static DWORD g_pendingCorpseAddr=0;
 static wchar_t g_pendingCorpseName[64]={};
 static DWORD g_pendingCorpseTime=0;
 
@@ -434,21 +437,34 @@ bool GameToClient(float gx, float gy, int& cx, int& cy) {
 
     float dx = gx - g_selfX;
     float dy = gy - g_selfY;
+    float len = sqrtf(dx*dx + dy*dy);
+    if (len < 0.5f) { cx = midX; cy = midY; return true; }
 
-    // Log window dimensions once for calibration
     static bool logged = false;
     if (!logged) {
         DebugLog("[CALIBRATE] Window client: %dx%d center=(%d,%d)", rc.right, rc.bottom, midX, midY);
         logged = true;
     }
 
-    // Absolute position: center + game_offset * scale
-    // Scale factor: pixels per game unit (adjust if clicks land wrong)
     constexpr float SCALE = 5.0f;
-    cx = midX + (int)(dx * SCALE);
-    cy = midY + (int)(dy * SCALE);
+    constexpr int MIN_DIST = 180;
 
-    // Clamp to screen bounds
+    int rawX = midX + (int)(dx * SCALE);
+    int rawY = midY + (int)(dy * SCALE);
+
+    int offX = rawX - midX;
+    int offY = rawY - midY;
+    float pixelDist = sqrtf((float)(offX*offX + offY*offY));
+
+    if(pixelDist < MIN_DIST && len > 0.5f) {
+        float extend = (float)MIN_DIST / pixelDist;
+        cx = midX + (int)(offX * extend);
+        cy = midY + (int)(offY * extend);
+    } else {
+        cx = rawX;
+        cy = rawY;
+    }
+
     if (cx < 5) cx = 5; if (cx > rc.right - 5) cx = rc.right - 5;
     if (cy < 5) cy = 5; if (cy > rc.bottom - 5) cy = rc.bottom - 5;
     return true;
@@ -658,11 +674,38 @@ void UpdateUI() {
     float sx,sy; int hp,mhp,mn,mmn; std::wstring name; int level=0, classId=0;
     std::vector<EntityData> pl,mb,np;
     std::vector<CorpseData> corpses;
-    if(!ReadGameState(sx,sy,hp,mhp,mn,mmn,name,level,classId,pl,mb,np,corpses)){
+    DWORD playerAddr=0;
+    if(!ReadGameState(sx,sy,hp,mhp,mn,mmn,name,level,classId,pl,mb,np,corpses,&playerAddr)){
         SetWindowTextW(g_hStatus,L"  Cannot read game memory"); g_connected=false; return;
     }
     g_selfX=sx; g_selfY=sy;
     g_cachedCorpses=corpses;
+
+    // Dump GM (game manager) structure to find camera/viewport data
+    static bool didGMDump = false;
+    if(!didGMDump && gm > 0x1000) {
+        didGMDump = true;
+        DebugLog("[GMDUMP] GM at 0x%08X", gm);
+        for(DWORD off = 0; off < 0x200; off += 4) {
+            int val = Read<int>(gm + off);
+            DebugLog("[GMDUMP] +0x%03X = %d (0x%08X)", off, val, val);
+        }
+        DebugLog("[GMDUMP] === END ===");
+    }
+
+    // Dump player entity memory to find screen coordinates
+    static float lastSX=0, lastSY=0;
+    if(playerAddr > 0x1000 && (sx != lastSX || sy != lastSY)) {
+        lastSX = sx; lastSY = sy;
+        DebugLog("[MEMDUMP] Player at 0x%08X game(%.1f,%.1f)", playerAddr, sx, sy);
+        for(DWORD off = 0; off < 0x800; off += 4) {
+            int val = Read<int>(playerAddr + off);
+            if(val != 0) {
+                DebugLog("[MEMDUMP] +0x%03X = %d (0x%08X)", off, val, val);
+            }
+        }
+        DebugLog("[MEMDUMP] === END ===");
+    }
     wchar_t buf[512];
     if(g_killCount>0 || g_lootCount>0) {
         swprintf_s(buf,L"  %s | Lv.%d %s | HP: %d/%d | Kills: %d | Loots: %d | Corpses: %d",
@@ -761,10 +804,11 @@ void UpdateUI() {
                     if(g_autoLoot && !g_hasPendingCorpse) {
                         g_pendingCorpseX = prev.x;
                         g_pendingCorpseY = prev.y;
+                        g_pendingCorpseAddr = prev.objAddr;
                         wcscpy_s(g_pendingCorpseName, prev.name);
                         g_pendingCorpseTime = GetTickCount();
                         g_hasPendingCorpse = true;
-                        DebugLog("[LOOT] Saved corpse pos for loot: '%S' (%.1f,%.1f)", prev.name, prev.x, prev.y);
+                        DebugLog("[LOOT] Saved corpse: '%S' addr=0x%08X (%.1f,%.1f)", prev.name, g_pendingCorpseAddr, prev.x, prev.y);
                     }
                 }
             }
@@ -1207,10 +1251,11 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam) {
                     if(g_autoLoot) {
                         g_pendingCorpseX = mobGX;
                         g_pendingCorpseY = mobGY;
+                        g_pendingCorpseAddr = g_selectedTargetAddr;
                         wcscpy_s(g_pendingCorpseName, g_selTargetName);
                         g_pendingCorpseTime = GetTickCount();
                         g_hasPendingCorpse = true;
-                        DebugLog("[LOOT] Saved corpse position: '%S' (%.1f, %.1f)", g_pendingCorpseName, g_pendingCorpseX, g_pendingCorpseY);
+                        DebugLog("[LOOT] Saved corpse: '%S' addr=0x%08X (%.1f, %.1f)", g_pendingCorpseName, g_pendingCorpseAddr, g_pendingCorpseX, g_pendingCorpseY);
                     }
 
                     bool found=false;
@@ -1256,79 +1301,34 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam) {
             HWND w=FindGameWindow();
             if(!w || GetForegroundWindow()!=w || IsIconic(w)) { break; }
 
-            // Priority 1: Use pending corpse (position saved when mob died)
-            if(g_hasPendingCorpse) {
-                float cx = g_pendingCorpseX, cy = g_pendingCorpseY;
-                float dx = cx - g_selfX;
-                float dy = cy - g_selfY;
-                float dist = sqrtf(dx*dx + dy*dy);
-                DWORD elapsed = GetTickCount() - g_pendingCorpseTime;
+            if(g_cachedCorpses.empty()) break;
 
-                DebugLog("[LOOT] Pending '%S' dist=%.1f age=%ds self=(%.1f,%.1f) corpse=(%.1f,%.1f)",
-                    g_pendingCorpseName, dist, elapsed/1000, g_selfX, g_selfY, cx, cy);
+            auto& c = g_cachedCorpses[0];
+            float dx = c.x - g_selfX;
+            float dy = c.y - g_selfY;
+            float dist = sqrtf(dx*dx + dy*dy);
 
-                if(elapsed > 20000) {
-                    DebugLog("[LOOT] Corpse expired (20s timeout)");
-                    g_hasPendingCorpse = false;
-                } else if(dist > 8.0f) {
-                    // FAR: Click to walk toward corpse, then sleep to let player move
-                    int corpseCX, corpseCY;
-                    if (GameToClient(cx, cy, corpseCX, corpseCY)) {
-                        DebugLog("[LOOT] Walk to corpse: game(%.1f,%.1f) -> client(%d,%d) dist=%.1f", cx, cy, corpseCX, corpseCY, dist);
-                        ClickAtClient(corpseCX, corpseCY);
-                        Sleep(800); // Wait for player to actually move
-                    }
-                } else {
-                    // CLOSE (< 8 game units): Click on corpse + Enter to Take All
-                    int corpseCX, corpseCY;
-                    if (GameToClient(cx, cy, corpseCX, corpseCY)) {
-                        DebugLog("[LOOT] Loot corpse at: game(%.1f,%.1f) -> client(%d,%d) dist=%.1f", cx, cy, corpseCX, corpseCY, dist);
-                        ClickAtClient(corpseCX, corpseCY);
-                        Sleep(400);
-                        SendInputKey(VK_RETURN);
-                        Sleep(300);
-                        SendInputKey(VK_RETURN);
-                        Sleep(200);
-                        g_lootCount++;
-                        g_lootClickCount++;
-                        wcscpy_s(g_lastLootName, g_pendingCorpseName);
-                        g_lastLootTime = GetTickCount();
-                        DebugLog("[LOOT] Looted! #%d '%S' | Total: %d loots / %d kills",
-                            g_lootClickCount, g_pendingCorpseName, g_lootCount, g_killCount);
-                    }
-                    g_hasPendingCorpse = false;
+            DebugLog("[LOOT] '%S' dist=%.1f addr=0x%08X game(%.1f,%.1f) self(%.1f,%.1f)", c.name, dist, c.objAddr, c.x, c.y, g_selfX, g_selfY);
+
+            if(dist > 10.0f) {
+                int cx, cy;
+                if(GameToClient(c.x, c.y, cx, cy)) {
+                    DebugLog("[LOOT] Walk -> client(%d,%d)", cx, cy);
+                    ClickAtClient(cx, cy);
+                    Sleep(500);
                 }
-                break;
-            }
-
-            // Priority 2: Use cached corpses from entity tree (fallback)
-            if(!g_cachedCorpses.empty()) {
-                auto& c = g_cachedCorpses[0];
-                float dx = c.x - g_selfX;
-                float dy = c.y - g_selfY;
-                float dist = sqrtf(dx*dx + dy*dy);
-
-                DebugLog("[LOOT] Tree corpse '%S' dist=%.1f game(%.1f,%.1f)", c.name, dist, c.x, c.y);
-
-                int corpseCX, corpseCY;
-                if (GameToClient(c.x, c.y, corpseCX, corpseCY)) {
-                    if(dist > 3.0f) {
-                        DebugLog("[LOOT] Walk to tree corpse: client(%d,%d)", corpseCX, corpseCY);
-                        ClickAtClient(corpseCX, corpseCY);
-                    } else {
-                        DebugLog("[LOOT] Loot tree corpse: client(%d,%d)", corpseCX, corpseCY);
-                        ClickAtClient(corpseCX, corpseCY);
-                        Sleep(400);
-                        SendInputKey(VK_RETURN);
-                        Sleep(300);
-                        SendInputKey(VK_RETURN);
-                        Sleep(200);
-                        g_lootCount++;
-                        g_lootClickCount++;
-                        wcscpy_s(g_lastLootName, c.name);
-                        g_lastLootTime = GetTickCount();
-                        DebugLog("[LOOT] Looted tree corpse! #%d '%S'", g_lootClickCount, c.name);
-                    }
+            } else {
+                int cx, cy;
+                if(GameToClient(c.x, c.y, cx, cy)) {
+                    DebugLog("[LOOT] Click corpse -> client(%d,%d)", cx, cy);
+                    ClickAtClient(cx, cy);
+                    Sleep(400);
+                    SendInputKey(VK_RETURN);
+                    Sleep(300);
+                    g_lootCount++;
+                    wcscpy_s(g_lastLootName, c.name);
+                    g_lastLootTime = GetTickCount();
+                    DebugLog("[LOOT] Done #%d '%S' | Kills=%d Loots=%d", g_lootCount, c.name, g_killCount, g_lootCount);
                 }
             }
         }

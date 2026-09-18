@@ -114,9 +114,10 @@ void TraverseTree(DWORD node, std::vector<EntityData>& entities, std::vector<Cor
     if (objPtr <= 0x1000) return;
 
     DWORD vtable = Read<DWORD>(objPtr + Game::ENT_VTABLE);
+    int hp = Read<int>(objPtr + Game::ENT_HP);
 
-    // Check if this is a corpse object
-    if (vtable == Game::VT_CORPSE) {
+    // Check if this is a corpse: HP < 0 means dead (e.g. -24 = 0xFFFFFFE8)
+    if (hp < 0) {
         CorpseData c{};
         c.objAddr = objPtr;
         DWORD namePtr = Read<DWORD>(objPtr + Game::ENT_NAME_PTR);
@@ -351,7 +352,7 @@ bool IsGameForeground() {
 
 void SendEnterAttack() {
     HWND gw = FindGameWindow();
-    if (!gw || GetForegroundWindow() != gw) return;
+    if (!gw || GetForegroundWindow() != gw || IsIconic(gw)) return;
     keybd_event(VK_RETURN, 0, 0, 0);
     Sleep(30);
     keybd_event(VK_RETURN, 0, KEYEVENTF_KEYUP, 0);
@@ -370,18 +371,25 @@ bool WriteGameTarget(DWORD addr) {
 
 void ClickAtClient(int cx, int cy) {
     HWND w=FindGameWindow(); if(!w) return;
+    // Only click if game window is foreground and not minimized
+    if(GetForegroundWindow()!=w || IsIconic(w)) return;
     // Force foreground
     DWORD fgTid = GetWindowThreadProcessId(w, NULL);
     DWORD myTid = GetCurrentThreadId();
     AttachThreadInput(myTid, fgTid, TRUE);
     SetForegroundWindow(w);
     AttachThreadInput(myTid, fgTid, FALSE);
-    // Move mouse and click via SendInput
+    // Re-check after attach
+    if(GetForegroundWindow()!=w) return;
+    // Convert client coords and click
     POINT pt={cx,cy}; ClientToScreen(w,&pt);
+    // Bounds check: click must be within screen
+    int sx=GetSystemMetrics(SM_CXSCREEN), sy=GetSystemMetrics(SM_CYSCREEN);
+    if(pt.x<0||pt.x>=sx||pt.y<0||pt.y>=sy) return;
     INPUT in[3]={};
     in[0].type=INPUT_MOUSE;
-    in[0].mi.dx=(LONG)(pt.x*65536.0/GetSystemMetrics(SM_CXSCREEN));
-    in[0].mi.dy=(LONG)(pt.y*65536.0/GetSystemMetrics(SM_CYSCREEN));
+    in[0].mi.dx=(LONG)(pt.x*65536.0/sx);
+    in[0].mi.dy=(LONG)(pt.y*65536.0/sy);
     in[0].mi.dwFlags=MOUSEEVENTF_MOVE|MOUSEEVENTF_ABSOLUTE;
     in[1].type=INPUT_MOUSE; in[1].mi.dwFlags=MOUSEEVENTF_LEFTDOWN;
     in[2].type=INPUT_MOUSE; in[2].mi.dwFlags=MOUSEEVENTF_LEFTUP;
@@ -898,13 +906,26 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam) {
     }
 
     case WM_TIMER: {
-        // Global hotkeys (F1/F3/F4) - check on key press transition
+        // Global hotkeys (F1/F2/F3/F4) - check on key press transition
         if(wParam==1) {
             // Check hotkeys first - only toggle on key press transition (not held down)
-            static bool f1Prev = false, f3Prev = false, f4Prev = false;
+            static bool f1Prev = false, f2Prev = false, f3Prev = false, f4Prev = false;
             bool f1Curr = (GetAsyncKeyState(VK_F1) & 1) != 0;
+            bool f2Curr = (GetAsyncKeyState(VK_F2) & 1) != 0;
             bool f3Curr = (GetAsyncKeyState(VK_F3) & 1) != 0;
             bool f4Curr = (GetAsyncKeyState(VK_F4) & 1) != 0;
+
+            // F2: STOP ALL (panic button)
+            if (f2Curr && !f2Prev) {
+                KillTimer(hWnd,2); KillTimer(hWnd,3); KillTimer(hWnd,4);
+                SendMessage(g_hChkAttack,BM_SETCHECK,BST_UNCHECKED,0);
+                SendMessage(g_hChkFollow,BM_SETCHECK,BST_UNCHECKED,0);
+                SendMessage(g_hChkLoot,BM_SETCHECK,BST_UNCHECKED,0);
+                g_selectedTargetAddr=0; g_followTargetAddr=0; g_autoLoot=false;
+                if(g_pBotCmd){g_pBotCmd->attackOn=0;g_pBotCmd->followOn=0;g_pBotCmd->targetAddr=0;g_pBotCmd->followAddr=0;}
+                SetWindowTextW(g_hStatus,L"  [F2] ALL STOPPED");
+                DebugLog("[F2] PANIC STOP - all timers killed");
+            }
 
             // F1 toggle: only act on press transition (release->press)
             if (f1Curr && !f1Prev) {
@@ -981,6 +1002,7 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam) {
                 }
             }
             f1Prev = f1Curr;
+            f2Prev = f2Curr;
             f3Prev = f3Curr;
             f4Prev = f4Curr;
             UpdateUI();

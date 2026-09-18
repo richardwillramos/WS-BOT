@@ -90,16 +90,22 @@ void ClickGroundDeselect(HWND hw, RECT winRect) {
 }
 
 // Convert game coords to screen coords (DLL version - runs inside game process)
-// Uses GetWindowRect for window center (screen coords)
+// Direction-based: clicks toward target at 80% of screen edge distance
 void GameToScreen(DWORD lp, int rawX, int rawY, int& sx, int& sy, RECT winRect) {
     int playerRawX = GR<int>(lp + 0x10);
     int playerRawY = GR<int>(lp + 0x14);
     float gameDX = (rawX - playerRawX) / 65536.0f;
     float gameDY = (rawY - playerRawY) / 65536.0f;
-    int centerX = (winRect.left + winRect.right) / 2;
-    int centerY = (winRect.top + winRect.bottom) / 2;
-    sx = centerX + (int)(gameDX * 10.0f);
-    sy = centerY + (int)(gameDY * 10.0f);
+    float len = sqrtf(gameDX * gameDX + gameDY * gameDY);
+    if (len < 0.5f) { sx = (winRect.left + winRect.right) / 2; sy = (winRect.top + winRect.bottom) / 2; return; }
+    float nx = gameDX / len;
+    float ny = gameDY / len;
+    float winW = (float)(winRect.right - winRect.left);
+    float winH = (float)(winRect.bottom - winRect.top);
+    float halfWin = (winW < winH ? winW : winH) / 2.0f;
+    float clickDist = halfWin * 0.8f;
+    sx = (winRect.left + winRect.right) / 2 + (int)(nx * clickDist);
+    sy = (winRect.top + winRect.bottom) / 2 + (int)(ny * clickDist);
 }
 
 DWORD WINAPI BotThread(LPVOID) {

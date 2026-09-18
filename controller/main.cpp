@@ -43,10 +43,6 @@ namespace Game {
     constexpr DWORD OBJ_OBJECT_ID  = 0x120;
     constexpr DWORD OBJ_TYPE_ID    = 0x124;
     constexpr DWORD OBJ_LIFETIME   = 0x128;
-
-    // Game-to-screen coordinate mapping
-    // Warspear 2D top-down: player centered, game coords map linearly to screen pixels.
-    constexpr float G2S_SCALE = 10.0f;
 }
 
 struct EntityData {
@@ -425,7 +421,9 @@ void SendInputKey(WORD vk) {
 }
 
 // Convert game coordinates to client-area coordinates
-// Returns false if game window not found
+// Warspear 2D top-down: game+X = screen RIGHT, game+Y = screen DOWN
+// Player is always centered on screen. Scale = pixels per game unit.
+// DEBUG: log window dimensions to calibrate scale
 bool GameToClient(float gx, float gy, int& cx, int& cy) {
     HWND w = FindGameWindow();
     if (!w) return false;
@@ -433,10 +431,24 @@ bool GameToClient(float gx, float gy, int& cx, int& cy) {
     GetClientRect(w, &rc);
     int midX = (rc.right - rc.left) / 2;
     int midY = (rc.bottom - rc.top) / 2;
+
     float dx = gx - g_selfX;
     float dy = gy - g_selfY;
-    cx = midX + (int)(dx * Game::G2S_SCALE);
-    cy = midY + (int)(dy * Game::G2S_SCALE);
+
+    // Log window dimensions once for calibration
+    static bool logged = false;
+    if (!logged) {
+        DebugLog("[CALIBRATE] Window client: %dx%d center=(%d,%d)", rc.right, rc.bottom, midX, midY);
+        logged = true;
+    }
+
+    // Absolute position: center + game_offset * scale
+    // Scale factor: pixels per game unit (adjust if clicks land wrong)
+    constexpr float SCALE = 5.0f;
+    cx = midX + (int)(dx * SCALE);
+    cy = midY + (int)(dy * SCALE);
+
+    // Clamp to screen bounds
     if (cx < 5) cx = 5; if (cx > rc.right - 5) cx = rc.right - 5;
     if (cy < 5) cy = 5; if (cy > rc.bottom - 5) cy = rc.bottom - 5;
     return true;
@@ -1163,7 +1175,13 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam) {
 
         if(wParam==2) { // Attack
             HWND gw = FindGameWindow();
-            if(!gw || GetForegroundWindow()!=gw || IsIconic(gw)) break;
+            if(!gw || GetForegroundWindow()!=gw || IsIconic(gw)) {
+                static int atkSkipCount = 0;
+                atkSkipCount++;
+                if(atkSkipCount % 20 == 1)
+                    DebugLog("[ATK] SKIPPED: gw=%d fg=%d iconic=%d", gw!=NULL, gw?GetForegroundWindow()==gw:0, gw?IsIconic(gw):0);
+                break;
+            }
 
             wchar_t filter[64]={};
             GetWindowTextW(g_hAtkName, filter, 64);
@@ -1252,15 +1270,16 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam) {
                 if(elapsed > 20000) {
                     DebugLog("[LOOT] Corpse expired (20s timeout)");
                     g_hasPendingCorpse = false;
-                } else if(dist > 3.0f) {
-                    // FAR: Use GameToClient to click toward corpse position
+                } else if(dist > 8.0f) {
+                    // FAR: Click to walk toward corpse, then sleep to let player move
                     int corpseCX, corpseCY;
                     if (GameToClient(cx, cy, corpseCX, corpseCY)) {
                         DebugLog("[LOOT] Walk to corpse: game(%.1f,%.1f) -> client(%d,%d) dist=%.1f", cx, cy, corpseCX, corpseCY, dist);
                         ClickAtClient(corpseCX, corpseCY);
+                        Sleep(800); // Wait for player to actually move
                     }
                 } else {
-                    // CLOSE: Click on corpse + Enter to Take All
+                    // CLOSE (< 8 game units): Click on corpse + Enter to Take All
                     int corpseCX, corpseCY;
                     if (GameToClient(cx, cy, corpseCX, corpseCY)) {
                         DebugLog("[LOOT] Loot corpse at: game(%.1f,%.1f) -> client(%d,%d) dist=%.1f", cx, cy, corpseCX, corpseCY, dist);

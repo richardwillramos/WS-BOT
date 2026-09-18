@@ -20,7 +20,7 @@ void Log(const char* msg) {
     OutputDebugStringA(msg);
     if (g_logFile == INVALID_HANDLE_VALUE) {
         g_logFile = CreateFileA(
-            "C:\\Users\\Admin\\Documents\\warspear-botv1.5\\bot_log.txt",
+            "C:\\Users\\Admin\\Documents\\GitHub\\WS-BOT\\bot_log.txt",
             GENERIC_WRITE, FILE_SHARE_READ|FILE_SHARE_WRITE,
             NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     }
@@ -39,7 +39,8 @@ DWORD GetGM(DWORD s) { return (s > 0x1000) ? GR<DWORD>(s + 0x14) : 0; }
 DWORD GetLP(DWORD g) { return (g > 0x1000) ? GR<DWORD>(g + 0x40) : 0; }
 
 void SetTarget(DWORD addr) {
-    DWORD lp = GetLP();
+    DWORD gm = GetGM(GetSys());
+    DWORD lp = GetLP(gm);
     if (lp > 0x1000) {
         GW<DWORD>(lp + 0x290, addr);
         GW<DWORD>(lp + 0x478, addr);

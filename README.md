@@ -267,3 +267,10 @@ O campo "Mob name" na aba Bot filtra quais mobs atacar:
 | Loot por tecla | Média | Enviar tecla/tab específica para loot |
 | UI Corpse List | Baixa | Mostrar lista de corpos na aba |
 | Overlay | Baixa | Mostrar HP/distance na tela do jogo |
+
+
+MEU PIX SE QUISER ME AJUDAR A COMPRAR LEITE PROS MEUS FILHOS 
+
+""  CNPJ : 57944048000175  ""
+
+RICHARD WILLIAN RAMOS - C6

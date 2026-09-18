@@ -1,1 +1,4 @@
 [INIT] sys=00FB5288 gm=0DEB05D8 lp=0B165610
+[ATK] target=0x0ABA8A18 hp=50000 kills=0
+[ATK] target=0x0ABA8A18 hp=50000 kills=0
+[ATK] target=0x0ABA8A18 hp=50000 kills=0

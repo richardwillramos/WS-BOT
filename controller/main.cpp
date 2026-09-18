@@ -549,12 +549,24 @@ void UpdateUI() {
     SetWindowTextW(g_hStatus,buf);
 
     g_cachedPlayers=pl;
-    SendMessageW(g_hPlayerList,LB_RESETCONTENT,0,0);
-    if(pl.empty()) SendMessageW(g_hPlayerList,LB_ADDSTRING,0,(LPARAM)L"(no players nearby)");
-    for(auto& p:pl){
-        wchar_t pfx[8]={}; if(g_followTargetAddr>0x1000&&p.objAddr==g_followTargetAddr) wcscpy_s(pfx,L"[>] ");
-        swprintf_s(buf,L"%s%-20s  HP: %d/%d  Dist: %.1f",pfx,p.name,p.hp,p.maxHp,p.distance);
-        SendMessageW(g_hPlayerList,LB_ADDSTRING,0,(LPARAM)buf);
+    static std::vector<EntityData> prevPlayers;
+    bool playersChanged = (pl.size() != prevPlayers.size());
+    if (!playersChanged) {
+        for (size_t i = 0; i < pl.size(); i++) {
+            if (pl[i].objAddr != prevPlayers[i].objAddr || pl[i].hp != prevPlayers[i].hp) {
+                playersChanged = true; break;
+            }
+        }
+    }
+    if (playersChanged) {
+        SendMessageW(g_hPlayerList,LB_RESETCONTENT,0,0);
+        if(pl.empty()) SendMessageW(g_hPlayerList,LB_ADDSTRING,0,(LPARAM)L"(no players nearby)");
+        for(auto& p:pl){
+            wchar_t pfx[8]={}; if(g_followTargetAddr>0x1000&&p.objAddr==g_followTargetAddr) wcscpy_s(pfx,L"[>] ");
+            swprintf_s(buf,L"%s%-20s  HP: %d/%d  Dist: %.1f",pfx,p.name,p.hp,p.maxHp,p.distance);
+            SendMessageW(g_hPlayerList,LB_ADDSTRING,0,(LPARAM)buf);
+        }
+        prevPlayers = pl;
     }
 
     if(g_followTargetAddr>0x1000){
@@ -567,12 +579,32 @@ void UpdateUI() {
     }
 
     g_cachedMobs=mb;
-    SendMessageW(g_hMobList,LB_RESETCONTENT,0,0);
-    if(mb.empty()) SendMessageW(g_hMobList,LB_ADDSTRING,0,(LPARAM)L"(no mobs nearby)");
-    for(auto&m:mb){
-        wchar_t pfx[8]={}; if(g_selectedTargetAddr>0x1000&&m.objAddr==g_selectedTargetAddr) wcscpy_s(pfx,L"[>] ");
-        swprintf_s(buf,L"%s%-20s  HP: %d/%d  Dist: %.1f%s",pfx,m.name,m.hp,m.maxHp,m.distance,m.hp<=0?L" [DEAD]":L"");
-        SendMessageW(g_hMobList,LB_ADDSTRING,0,(LPARAM)buf);
+    // Only rebuild mob list if data changed
+    static std::vector<EntityData> prevMobs;
+    bool mobsChanged = (mb.size() != prevMobs.size());
+    if (!mobsChanged) {
+        for (size_t i = 0; i < mb.size(); i++) {
+            if (mb[i].objAddr != prevMobs[i].objAddr || mb[i].hp != prevMobs[i].hp || mb[i].maxHp != prevMobs[i].maxHp) {
+                mobsChanged = true; break;
+            }
+        }
+    }
+    if (mobsChanged) {
+        int prevSel = (int)SendMessageW(g_hMobList, LB_GETCURSEL, 0, 0);
+        DWORD prevSelAddr = 0;
+        if (prevSel != LB_ERR && prevSel < (int)prevMobs.size()) prevSelAddr = prevMobs[prevSel].objAddr;
+        SendMessageW(g_hMobList,LB_RESETCONTENT,0,0);
+        if(mb.empty()) SendMessageW(g_hMobList,LB_ADDSTRING,0,(LPARAM)L"(no mobs nearby)");
+        int newSel = 0;
+        for(size_t i=0;i<mb.size();i++){
+            auto&m=mb[i];
+            wchar_t pfx[8]={}; if(g_selectedTargetAddr>0x1000&&m.objAddr==g_selectedTargetAddr) wcscpy_s(pfx,L"[>] ");
+            swprintf_s(buf,L"%s%-20s  HP: %d/%d  Dist: %.1f%s",pfx,m.name,m.hp,m.maxHp,m.distance,m.hp<=0?L" [DEAD]":L"");
+            SendMessageW(g_hMobList,LB_ADDSTRING,0,(LPARAM)buf);
+            if (prevSelAddr > 0x1000 && m.objAddr == prevSelAddr) newSel = (int)i;
+        }
+        if (prevSel != LB_ERR) SendMessageW(g_hMobList, LB_SETCURSEL, newSel, 0);
+        prevMobs = mb;
     }
 
     if(g_selectedTargetAddr>0x1000){
@@ -585,9 +617,21 @@ void UpdateUI() {
         if(!f){SetWindowTextW(g_hTargetName,L"(target lost)");SetWindowTextW(g_hTargetHP,L"");}
     }
 
-    SendMessageW(g_hNpcList,LB_RESETCONTENT,0,0);
-    if(np.empty()) SendMessageW(g_hNpcList,LB_ADDSTRING,0,(LPARAM)L"(no NPCs nearby)");
-    for(auto&n:np){swprintf_s(buf,L"%-20s  HP: %d/%d  Dist: %.1f",n.name,n.hp,n.maxHp,n.distance);SendMessageW(g_hNpcList,LB_ADDSTRING,0,(LPARAM)buf);}
+    static std::vector<EntityData> prevNpcs;
+    bool npcsChanged = (np.size() != prevNpcs.size());
+    if (!npcsChanged) {
+        for (size_t i = 0; i < np.size(); i++) {
+            if (np[i].objAddr != prevNpcs[i].objAddr || np[i].hp != prevNpcs[i].hp) {
+                npcsChanged = true; break;
+            }
+        }
+    }
+    if (npcsChanged) {
+        SendMessageW(g_hNpcList,LB_RESETCONTENT,0,0);
+        if(np.empty()) SendMessageW(g_hNpcList,LB_ADDSTRING,0,(LPARAM)L"(no NPCs nearby)");
+        for(auto&n:np){swprintf_s(buf,L"%-20s  HP: %d/%d  Dist: %.1f",n.name,n.hp,n.maxHp,n.distance);SendMessageW(g_hNpcList,LB_ADDSTRING,0,(LPARAM)buf);}
+        prevNpcs = np;
+    }
 }
 
 // ============================================================

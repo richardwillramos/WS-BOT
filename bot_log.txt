@@ -1,15 +1,1 @@
-[INIT] sys=00FB5288 gm=0DEB05D8 lp=0B165610 cObj=0BA37D80
-[INIT] hwnd=001C088E
-[INIT] windowCenter=(-31920,-31986)
-[TAB] pressing Tab to find target
-[TAB] pressing Tab to find target
-[TAB] pressing Tab to find target
-[TAB] pressing Tab to find target
-[TAB] pressing Tab to find target
-[TAB] pressing Tab to find target
-[TAB] pressing Tab to find target
-[TAB] pressing Tab to find target
-[TAB] pressing Tab to find target
-[TAB] pressing Tab to find target
-[TAB] pressing Tab to find target
-[TAB] pressing Tab to find target
+[INIT] sys=00FB5288 gm=0DEB05D8 lp=0B165610

@@ -401,6 +401,9 @@ void FollowTarget() {
 
     if(dist<1.0f) return;
 
+    // Select target in game (same as mob attack)
+    WriteGameTarget(g_followTargetAddr);
+
     HWND w=FindGameWindow(); if(!w) return;
     RECT rc; GetClientRect(w,&rc);
     int cx=(rc.right-rc.left)/2, cy=(rc.bottom-rc.top)/2;

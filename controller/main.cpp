@@ -35,6 +35,8 @@ namespace Game {
     constexpr DWORD ENT_MAX_HP    = 0x110;
     constexpr DWORD ENT_MANA      = 0x114;
     constexpr DWORD ENT_MAX_MANA  = 0x118;
+    constexpr DWORD ENT_LEVEL     = 0x2E0;
+    constexpr DWORD ENT_CLASS_IND = 0x2D0;
     constexpr DWORD VT_PLAYER  = 0x00C80F9C;
     constexpr DWORD VT_BEAST   = 0x00C81490;
     constexpr DWORD VT_CORPSE  = 0x00C4FC5C;
@@ -47,6 +49,8 @@ struct EntityData {
     wchar_t name[64];
     float x, y;
     int hp, maxHp, mana, maxMana;
+    int level;
+    int classId;
     float distance;
     int type;
     DWORD objAddr;
@@ -85,6 +89,20 @@ static const wchar_t* NPC_NAMES[] = {
 };
 static const int NPC_COUNT = sizeof(NPC_NAMES) / sizeof(NPC_NAMES[0]);
 bool IsNPC(const std::wstring& n) { for (int i=0;i<NPC_COUNT;i++) if(n==NPC_NAMES[i]) return true; return false; }
+
+const wchar_t* GetClassName(int classId) {
+    switch(classId) {
+        case 1: return L"Seeker";
+        case 2: return L"Shadow";
+        case 3: return L"Druid";
+        case 4: return L"Paladin";
+        case 5: return L"Mage";
+        case 6: return L"Necromancer";
+        case 7: return L"Technician";
+        case 8: return L"Assassin";
+        default: return L"Unknown";
+    }
+}
 
 void TraverseTree(DWORD node, std::vector<EntityData>& entities, std::vector<CorpseData>& corpses, float selfX, float selfY) {
     if (node <= 0x1000) return;
@@ -134,13 +152,16 @@ void TraverseTree(DWORD node, std::vector<EntityData>& entities, std::vector<Cor
     else if (vtable==Game::VT_BEAST) e.type=4;
     else if (IsNPC(e.name)) e.type=3;
     else e.type=2;
+    e.level=Read<int>(objPtr+Game::ENT_LEVEL);
+    e.classId=Read<int>(objPtr+Game::ENT_CLASS_IND);
     e.distance=CalcDist(selfX,selfY,e.x,e.y);
     if (e.hp==0&&e.maxHp==0) return;
     entities.push_back(e);
 }
 
 bool ReadGameState(float& sx, float& sy, int& hp, int& mhp, int& mn, int& mmn,
-                   std::wstring& name, std::vector<EntityData>& pl,
+                   std::wstring& name, int& level, int& classId,
+                   std::vector<EntityData>& pl,
                    std::vector<EntityData>& mb, std::vector<EntityData>& np,
                    std::vector<CorpseData>& corpses) {
     pl.clear(); mb.clear(); np.clear(); corpses.clear();
@@ -150,6 +171,8 @@ bool ReadGameState(float& sx, float& sy, int& hp, int& mhp, int& mn, int& mmn,
     sx=Read<int>(lp+Game::ENT_RAW_X)/65536.0f; sy=Read<int>(lp+Game::ENT_RAW_Y)/65536.0f;
     hp=Read<int>(lp+Game::ENT_HP); mhp=Read<int>(lp+Game::ENT_MAX_HP);
     mn=Read<int>(lp+Game::ENT_MANA); mmn=Read<int>(lp+Game::ENT_MAX_MANA);
+    level=Read<int>(lp+Game::ENT_LEVEL);
+    classId=Read<int>(lp+Game::ENT_CLASS_IND);
     DWORD np2=Read<DWORD>(lp+Game::ENT_NAME_PTR); int nl=Read<int>(lp+Game::ENT_NAME_LEN);
     if(nl>0&&nl<64&&np2>0x1000){wchar_t w[64]={};for(int i=0;i<nl;i++){wchar_t c=Read<wchar_t>(np2+i*2);if(c==0)break;w[i]=c;}name=w;}
     else name=L"(unknown)";
@@ -509,10 +532,10 @@ void UpdateUI() {
         SetWindowTextW(g_hStatus,g_hProcess?L"  Connected (memory read OK)":L"  Select Warspear and click CONNECT");
         return;
     }
-    float sx,sy; int hp,mhp,mn,mmn; std::wstring name;
+    float sx,sy; int hp,mhp,mn,mmn; std::wstring name; int level=0, classId=0;
     std::vector<EntityData> pl,mb,np;
     std::vector<CorpseData> corpses;
-    if(!ReadGameState(sx,sy,hp,mhp,mn,mmn,name,pl,mb,np,corpses)){
+    if(!ReadGameState(sx,sy,hp,mhp,mn,mmn,name,level,classId,pl,mb,np,corpses)){
         SetWindowTextW(g_hStatus,L"  Cannot read game memory"); g_connected=false; return;
     }
     g_selfX=sx; g_selfY=sy;
@@ -608,18 +631,18 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam) {
                 break;
             }
             DebugLog("[CONNECT] Process opened, reading game state...");
-            float x,y; int hp,mhp,mn,mmn; std::wstring name;
+            float x,y; int hp,mhp,mn,mmn; std::wstring name; int level=0, classId=0;
             std::vector<EntityData> p,m,n;
             std::vector<CorpseData> corpses;
-            if(ReadGameState(x,y,hp,mhp,mn,mmn,name,p,m,n,corpses)){
+            if(ReadGameState(x,y,hp,mhp,mn,mmn,name,level,classId,p,m,n,corpses)){
                 g_connected=true;
                 DebugLog("[CONNECT] SUCCESS - Character: %S", name.c_str());
-                DebugLog("[CONNECT] Position: (%.1f, %.1f) HP: %d/%d Mana: %d/%d", x, y, hp, mhp, mn, mmn);
+                DebugLog("[CONNECT] Position: (%.1f, %.1f) HP: %d/%d Mana: %d/%d Level: %d Class: %d", x, y, hp, mhp, mn, mmn, level, classId);
                 DebugLog("[CONNECT] Entities: %d players, %d mobs, %d NPCs, %d corpses", (int)p.size(), (int)m.size(), (int)n.size(), (int)corpses.size());
                 OpenDebugConsole(hWnd);
                 wchar_t m2[256];
-                swprintf_s(m2,L"Connected to PID %d!\n\nCharacter: %s\nHP: %d/%d\nMana: %d/%d\nPlayers: %d  Mobs: %d  NPCs: %d\nCorpses: %d",
-                    pid,name.c_str(),hp,mhp,mn,mmn,(int)p.size(),(int)m.size(),(int)n.size(),(int)corpses.size());
+                swprintf_s(m2,L"Connected to PID %d!\n\nCharacter: %s\nLevel: %d\nClass: %s\nHP: %d/%d\nMana: %d/%d\nPlayers: %d  Mobs: %d  NPCs: %d\nCorpses: %d",
+                    pid,name.c_str(),level,GetClassName(classId),hp,mhp,mn,mmn,(int)p.size(),(int)m.size(),(int)n.size(),(int)corpses.size());
                 MessageBoxW(hWnd,m2,L"Connected!",MB_OK|MB_ICONINFORMATION);
             } else {
                 DebugLog("[CONNECT] FAILED to read game memory");

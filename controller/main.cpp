@@ -225,6 +225,7 @@ static DWORD g_followTargetAddr=0; static wchar_t g_followName[64]={};
 static std::vector<EntityData> g_cachedPlayers;
 static std::vector<CorpseData> g_cachedCorpses;
 static float g_selfX=0, g_selfY=0;
+static float g_scale=3.5f;  // pixels per game unit, adjustable via F5/F6
 static bool g_connected=false;
 static bool g_dllInjected=false;
 static wchar_t g_attackMobFilter[64]={};
@@ -427,7 +428,6 @@ void SendInputKey(WORD vk) {
 // Convert game coordinates to client-area coordinates
 // Warspear 2D top-down: game+X = screen RIGHT, game+Y = screen DOWN
 // Player is always centered on screen. Scale = pixels per game unit.
-// DEBUG: log window dimensions to calibrate scale
 bool GameToClient(float gx, float gy, int& cx, int& cy) {
     HWND w = FindGameWindow();
     if (!w) return false;
@@ -443,28 +443,12 @@ bool GameToClient(float gx, float gy, int& cx, int& cy) {
 
     static bool logged = false;
     if (!logged) {
-        DebugLog("[CALIBRATE] Window client: %dx%d center=(%d,%d)", rc.right, rc.bottom, midX, midY);
+        DebugLog("[CALIBRATE] Window client: %dx%d center=(%d,%d) scale=%.2f", rc.right, rc.bottom, midX, midY, g_scale);
         logged = true;
     }
 
-    constexpr float SCALE = 5.0f;
-    constexpr int MIN_DIST = 180;
-
-    int rawX = midX + (int)(dx * SCALE);
-    int rawY = midY + (int)(dy * SCALE);
-
-    int offX = rawX - midX;
-    int offY = rawY - midY;
-    float pixelDist = sqrtf((float)(offX*offX + offY*offY));
-
-    if(pixelDist < MIN_DIST && len > 0.5f) {
-        float extend = (float)MIN_DIST / pixelDist;
-        cx = midX + (int)(offX * extend);
-        cy = midY + (int)(offY * extend);
-    } else {
-        cx = rawX;
-        cy = rawY;
-    }
+    cx = midX + (int)(dx * g_scale);
+    cy = midY + (int)(dy * g_scale);
 
     if (cx < 5) cx = 5; if (cx > rc.right - 5) cx = rc.right - 5;
     if (cy < 5) cy = 5; if (cy > rc.bottom - 5) cy = rc.bottom - 5;
@@ -681,19 +665,6 @@ void UpdateUI() {
     }
     g_selfX=sx; g_selfY=sy;
     g_cachedCorpses=corpses;
-
-    // One-shot GM dump to find camera/viewport
-    static bool didGMDump = false;
-    if(!didGMDump && gmAddr > 0x1000) {
-        didGMDump = true;
-        DebugLog("[GMDUMP] GM at 0x%08X player(%.1f,%.1f)", gmAddr, sx, sy);
-        for(DWORD off = 0; off < 0x200; off += 4) {
-            int val = Read<int>(gmAddr + off);
-            DebugLog("[GMDUMP] +0x%03X = %d (0x%08X)", off, val, val);
-        }
-        DebugLog("[GMDUMP] === END ===");
-    }
-
     wchar_t buf[512];
     if(g_killCount>0 || g_lootCount>0) {
         swprintf_s(buf,L"  %s | Lv.%d %s | HP: %d/%d | Kills: %d | Loots: %d | Corpses: %d",
@@ -1198,6 +1169,24 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam) {
                     }
                 }
             }
+
+            // F5/F6: scale calibration (F5 = increase, F6 = decrease)
+            bool f5Curr = (GetAsyncKeyState(VK_F5) & 1) != 0;
+            bool f6Curr = (GetAsyncKeyState(VK_F6) & 1) != 0;
+            if (f5Curr) {
+                g_scale += 0.5f;
+                wchar_t s[64]; swprintf_s(s, L"  Scale: %.2f px/unit", g_scale);
+                SetWindowTextW(g_hStatus, s);
+                DebugLog("[SCALE] F5 -> scale=%.2f", g_scale);
+            }
+            if (f6Curr) {
+                g_scale -= 0.5f;
+                if (g_scale < 0.5f) g_scale = 0.5f;
+                wchar_t s[64]; swprintf_s(s, L"  Scale: %.2f px/unit", g_scale);
+                SetWindowTextW(g_hStatus, s);
+                DebugLog("[SCALE] F6 -> scale=%.2f", g_scale);
+            }
+
             f1Prev = f1Curr;
             f2Prev = f2Curr;
             f3Prev = f3Curr;

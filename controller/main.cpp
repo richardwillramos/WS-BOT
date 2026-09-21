@@ -43,6 +43,14 @@ namespace Game {
     constexpr DWORD OBJ_OBJECT_ID  = 0x120;
     constexpr DWORD OBJ_TYPE_ID    = 0x124;
     constexpr DWORD OBJ_LIFETIME   = 0x128;
+
+    // Cursor object (Ghidra: cursor.cpp FUN_006C5CE0, FUN_006C4EA0)
+    constexpr DWORD CURSOR_OFFSET  = 0x123C;  // GM_base + 0x123C -> cursor object
+    constexpr DWORD CUR_X          = 0x08;     // WORD tile X
+    constexpr DWORD CUR_Y          = 0x0A;     // WORD tile Y
+    constexpr DWORD CUR_RAW_X      = 0x10;     // int raw X (tile * 0x180000)
+    constexpr DWORD CUR_RAW_Y      = 0x14;     // int raw Y
+    constexpr DWORD CUR_FLAG       = 0x7C;     // DWORD: 0x10=walk
 }
 
 struct EntityData {
@@ -74,6 +82,13 @@ T Read(DWORD addr) {
     if (g_hProcess && addr > 0x1000)
         ReadProcessMemory(g_hProcess, (LPCVOID)addr, &val, sizeof(T), NULL);
     return val;
+}
+
+template<typename T>
+bool Write(DWORD addr, T val) {
+    if (!g_hProcess || addr <= 0x1000) return false;
+    SIZE_T written = 0;
+    return WriteProcessMemory(g_hProcess, (LPVOID)addr, &val, sizeof(T), &written) && written == sizeof(T);
 }
 
 float CalcDist(float x1, float y1, float x2, float y2) {
@@ -485,6 +500,79 @@ void ClickGroundDeselect() {
     ClickAtClient(gx, gy);
 }
 
+// ============================================================
+// Cursor-based movement (write cursor X/Y + Enter)
+// ============================================================
+DWORD GetCursorAddr() {
+    DWORD gmPtr = Read<DWORD>(Game::GM_PTR);
+    if (gmPtr <= 0x1000) return 0;
+    DWORD gm = Read<DWORD>(gmPtr + Game::GM_OFFSET);
+    if (gm <= 0x1000) return 0;
+    return Read<DWORD>(gm + Game::CURSOR_OFFSET);
+}
+
+// Write tile position to cursor memory ( FUN_006C6290 equivalent)
+// Writes X/Y, raw pixel (tile*0x180000), packed coords, hash, and walk flag
+bool WriteCursorPos(WORD tileX, WORD tileY) {
+    DWORD cur = GetCursorAddr();
+    if (cur <= 0x1000) {
+        DebugLog("[CURSOR] Invalid cursor addr: 0x%08X", cur);
+        return false;
+    }
+    // Clamp to 0-27 (game uses max 27 tiles)
+    if (tileX > 27) tileX = 27;
+    if (tileY > 27) tileY = 27;
+
+    // Write tile coords
+    Write<WORD>(cur + Game::CUR_X, tileX);
+    Write<WORD>(cur + Game::CUR_Y, tileY);
+
+    // Write raw pixel position (tile * 0x180000 = tile * 1572864)
+    int rawX = (int)tileX * 0x180000;
+    int rawY = (int)tileY * 0x180000;
+    Write<int>(cur + Game::CUR_RAW_X, rawX);
+    Write<int>(cur + Game::CUR_RAW_Y, rawY);
+
+    // Write walk flag (0x10 = walk/default cursor state)
+    Write<DWORD>(cur + Game::CUR_FLAG, 0x10);
+
+    DebugLog("[CURSOR] Wrote tile(%d,%d) raw(%d,%d) flag=16", tileX, tileY, rawX, rawY);
+    return true;
+}
+
+// Move to tile position using cursor memory + Enter key
+// Game tile = gameCoord / 24. Raw = tile * 0x180000
+bool MoveToTile(float gameX, float gameY) {
+    // Convert game coords to tile coords (1 tile = 24 game units)
+    WORD tileX = (WORD)((int)(gameX / 24.0f));
+    WORD tileY = (WORD)((int)(gameY / 24.0f));
+
+    // Clamp to valid range (0-27)
+    if (tileX > 27) tileX = 27;
+    if (tileY > 27) tileY = 27;
+
+    DebugLog("[MOVE] game(%.1f,%.1f) -> tile(%d,%d)", gameX, gameY, tileX, tileY);
+
+    if (!WriteCursorPos(tileX, tileY)) return false;
+
+    Sleep(30);
+
+    // Press Enter to confirm walk
+    HWND gw = FindGameWindow();
+    if (!gw) return false;
+
+    // Temporarily restore focus if needed
+    DWORD fgTid = GetWindowThreadProcessId(gw, NULL);
+    DWORD myTid = GetCurrentThreadId();
+    AttachThreadInput(myTid, fgTid, TRUE);
+    SetForegroundWindow(gw);
+    AttachThreadInput(myTid, fgTid, FALSE);
+
+    SendEnterAttack();
+    DebugLog("[MOVE] Enter sent");
+    return true;
+}
+
 // Full attack sequence: deselect -> hover mob -> click mob
 void AttackMob(DWORD mobAddr, float mobGameX, float mobGameY) {
     HWND gw = FindGameWindow();
@@ -527,16 +615,9 @@ void FollowTarget() {
 
     if(dist<1.0f) return;
 
-    // Use GameToScreen for proper coordinate mapping
-    int targetCX, targetCY;
-    if (!GameToClient(tx, ty, targetCX, targetCY)) {
-        DebugLog("[FOLLOW] GameToClient failed");
-        return;
-    }
-
-    // Click toward the target position
-    DebugLog("[FOLLOW] click client=(%d,%d)", targetCX, targetCY);
-    ClickAtClient(targetCX, targetCY);
+    // Cursor-based movement: write tile coords + raw pixel + flag, then Enter
+    DebugLog("[FOLLOW] MoveToTile game(%.1f,%.1f)", tx, ty);
+    MoveToTile(tx, ty);
 }
 
 // ============================================================
@@ -1288,12 +1369,10 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam) {
             DebugLog("[LOOT] '%S' dist=%.1f addr=0x%08X game(%.1f,%.1f) self(%.1f,%.1f)", c.name, dist, c.objAddr, c.x, c.y, g_selfX, g_selfY);
 
             if(dist > 10.0f) {
-                int cx, cy;
-                if(GameToClient(c.x, c.y, cx, cy)) {
-                    DebugLog("[LOOT] Walk -> client(%d,%d)", cx, cy);
-                    ClickAtClient(cx, cy);
-                    Sleep(500);
-                }
+                // Walk toward corpse using cursor-based movement
+                DebugLog("[LOOT] Walk -> game(%.1f,%.1f)", c.x, c.y);
+                MoveToTile(c.x, c.y);
+                Sleep(500);
             } else {
                 int cx, cy;
                 if(GameToClient(c.x, c.y, cx, cy)) {

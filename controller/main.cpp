@@ -107,14 +107,27 @@ bool IsNPC(const std::wstring& n) { for (int i=0;i<NPC_COUNT;i++) if(n==NPC_NAME
 
 const wchar_t* GetClassName(int classId) {
     switch(classId) {
-        case 1: return L"Seeker";
-        case 2: return L"Shadow";
-        case 3: return L"Druid";
-        case 4: return L"Paladin";
-        case 5: return L"Mage";
-        case 6: return L"Necromancer";
-        case 7: return L"Technician";
-        case 8: return L"Assassin";
+        case 0:  return L"Undefined";
+        case 1:  return L"Paladin";
+        case 2:  return L"Priest";
+        case 3:  return L"Mage";
+        case 4:  return L"Barbarian";
+        case 5:  return L"Rogue";
+        case 6:  return L"Shaman";
+        case 7:  return L"Bladedancer";
+        case 8:  return L"Ranger";
+        case 9:  return L"Druid";
+        case 10: return L"Deathknight";
+        case 11: return L"Necromancer";
+        case 12: return L"Warlock";
+        case 13: return L"Seeker";
+        case 14: return L"Hunter";
+        case 15: return L"Warden";
+        case 16: return L"Charmer";
+        case 17: return L"Templar";
+        case 18: return L"Chieftain";
+        case 19: return L"Beastmaster";
+        case 20: return L"Reaper";
         default: return L"Unknown";
     }
 }
@@ -244,6 +257,12 @@ static float g_scale=3.5f;  // pixels per game unit, adjustable via F5/F6
 static bool g_connected=false;
 static bool g_followPaused=false;  // true when target lost due to zone change
 static bool g_dllInjected=false;
+
+// Dead mob addresses - prevent re-targeting before cache refresh
+static DWORD g_deadAddrs[16] = {};
+static int g_deadIdx = 0;
+static bool IsDeadAddr(DWORD addr) { for(int i=0;i<16;i++) if(g_deadAddrs[i]==addr) return true; return false; }
+static void MarkDead(DWORD addr) { g_deadAddrs[g_deadIdx & 15] = addr; g_deadIdx++; }
 static wchar_t g_attackMobFilter[64]={};
 static bool g_autoLoot=false;
 
@@ -290,6 +309,7 @@ void UpdateBotCmd() {
 
 struct ProcInfo { DWORD pid; std::wstring name; };
 static std::vector<ProcInfo> g_procs;
+static std::vector<int> g_listToProc; // maps listbox index -> g_procs index
 
 // ============================================================
 // Debug Console
@@ -362,11 +382,7 @@ void CloseDebugConsole() {
 // Find game window
 // ============================================================
 HWND FindGameWindow() {
-    HWND h = FindWindowW(NULL, L"Warspear Online");
-    if (h) return h;
-    h = FindWindowW(NULL, L"Warspear");
-    if (h) return h;
-    if (g_gamePid) {
+    if(g_gamePid) {
         struct Ctx { DWORD pid; HWND h; } ctx={g_gamePid,NULL};
         EnumWindows([](HWND h,LPARAM lp)->BOOL{
             auto c=(Ctx*)lp; DWORD p=0; GetWindowThreadProcessId(h,&p);
@@ -646,6 +662,7 @@ DWORD FindPlayerByName(const wchar_t* name) {
 // ============================================================
 void RefreshProcesses() {
     g_procs.clear();
+    g_listToProc.clear();
     SendMessageW(g_hProcList,LB_RESETCONTENT,0,0);
     HANDLE hs=CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0);
     if(hs==INVALID_HANDLE_VALUE) return;
@@ -653,9 +670,60 @@ void RefreshProcesses() {
     if(Process32FirstW(hs,&pe)){do{g_procs.push_back({pe.th32ProcessID,pe.szExeFile});}while(Process32NextW(hs,&pe));}
     CloseHandle(hs);
     std::sort(g_procs.begin(),g_procs.end(),[](const ProcInfo& a,const ProcInfo& b){return a.name<b.name;});
+
+    // Separate warspear instances and other processes
+    std::vector<size_t> wsIdx, otherIdx;
     for(size_t i=0;i<g_procs.size();i++){
-        wchar_t b[256]; swprintf_s(b,L"%s  (PID %d)",g_procs[i].name.c_str(),g_procs[i].pid);
-        SendMessageW(g_hProcList,LB_ADDSTRING,0,(LPARAM)b);
+        if(_wcsicmp(g_procs[i].name.c_str(), L"warspear.exe")==0) wsIdx.push_back(i);
+        else otherIdx.push_back(i);
+    }
+
+    // Show warspear instances with character names
+    for(size_t idx : wsIdx){
+        g_listToProc.push_back((int)idx);
+        auto& p = g_procs[idx];
+        HANDLE hp = OpenProcess(PROCESS_QUERY_INFORMATION|PROCESS_VM_READ, FALSE, p.pid);
+        std::wstring charName = L"(loading...)";
+        int level = 0, classId = 0;
+        if(hp){
+            float x,y; int hpVal,mhp,mn,mmn;
+            std::vector<EntityData> ents, mobs, npcs;
+            std::vector<CorpseData> corpses;
+            DWORD pAddr=0, gmAddr=0;
+            // Save/restore globals temporarily
+            DWORD savedPid = g_gamePid;
+            HANDLE savedH = g_hProcess;
+            g_gamePid = p.pid;
+            g_hProcess = hp;
+            if(!ReadGameState(x,y,hpVal,mhp,mn,mmn,charName,level,classId,ents,mobs,npcs,corpses,&pAddr,&gmAddr)){
+                charName = L"(not loaded)";
+            }
+            g_gamePid = savedPid;
+            g_hProcess = savedH;
+            CloseHandle(hp);
+        }
+        wchar_t buf[256];
+        if(charName != L"(loading...)" && charName != L"(not loaded)"){
+            const wchar_t* cls = GetClassName(classId);
+            swprintf_s(buf, L"%s [Lv.%d %s]  (PID %d)", charName.c_str(), level, cls, p.pid);
+        } else {
+            swprintf_s(buf, L"%s  (PID %d)", charName.c_str(), p.pid);
+        }
+        SendMessageW(g_hProcList, LB_ADDSTRING, 0, (LPARAM)buf);
+    }
+
+    // Separator
+    if(!wsIdx.empty() && !otherIdx.empty()){
+        g_listToProc.push_back(-1); // separator
+        SendMessageW(g_hProcList, LB_ADDSTRING, 0, (LPARAM)L"--- other processes ---");
+    }
+
+    // Show other processes
+    for(size_t idx : otherIdx){
+        g_listToProc.push_back((int)idx);
+        auto& p = g_procs[idx];
+        wchar_t buf[256]; swprintf_s(buf,L"%s  (PID %d)",p.name.c_str(),p.pid);
+        SendMessageW(g_hProcList,LB_ADDSTRING,0,(LPARAM)buf);
     }
 }
 
@@ -767,6 +835,16 @@ void UpdateUI() {
     }
     g_selfX=sx; g_selfY=sy;
     g_cachedCorpses=corpses;
+
+    // Update window title with character info (for multi-instance identification)
+    static std::wstring lastCharName;
+    if(name != lastCharName) {
+        wchar_t wtitle[128];
+        swprintf_s(wtitle, L"WS-Bot - %s [Lv.%d %s]", name.c_str(), level, GetClassName(classId));
+        SetWindowTextW(g_hWnd, wtitle);
+        lastCharName = name;
+    }
+
     wchar_t buf[512];
     if(g_killCount>0 || g_lootCount>0) {
         swprintf_s(buf,L"  %s | Lv.%d %s | HP: %d/%d | Kills: %d | Loots: %d | Corpses: %d",
@@ -939,12 +1017,17 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam) {
         // Connect (read memory only, no DLL)
         if(id==1002) {
             int sel=(int)SendMessageW(g_hProcList,LB_GETCURSEL,0,0);
-            if(sel==LB_ERR||sel>=(int)g_procs.size()){
+            if(sel==LB_ERR||sel>=(int)g_listToProc.size()){
                 DebugLog("[CONNECT] No process selected");
                 MessageBoxW(hWnd,L"Select a process first!",L"",MB_OK|MB_ICONWARNING); break;
             }
-            DWORD pid=g_procs[sel].pid;
-            DebugLog("[CONNECT] Attempting to connect to PID %d (%S)", pid, g_procs[sel].name.c_str());
+            int procIdx = g_listToProc[sel];
+            if(procIdx < 0 || procIdx >= (int)g_procs.size()){
+                DebugLog("[CONNECT] Invalid selection");
+                break;
+            }
+            DWORD pid=g_procs[procIdx].pid;
+            DebugLog("[CONNECT] Attempting to connect to PID %d (%S)", pid, g_procs[procIdx].name.c_str());
             if(g_hProcess) CloseHandle(g_hProcess);
             g_hProcess=OpenProcess(PROCESS_QUERY_INFORMATION|PROCESS_VM_READ|PROCESS_VM_WRITE|PROCESS_VM_OPERATION,FALSE,pid);
             g_gamePid=pid;
@@ -963,6 +1046,14 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam) {
                 DebugLog("[CONNECT] Position: (%.1f, %.1f) HP: %d/%d Mana: %d/%d Level: %d Class: %d", x, y, hp, mhp, mn, mmn, level, classId);
                 DebugLog("[CONNECT] Entities: %d players, %d mobs, %d NPCs, %d corpses", (int)p.size(), (int)m.size(), (int)n.size(), (int)corpses.size());
                 OpenDebugConsole(hWnd);
+                // Rename window to character name for multi-instance identification
+                wchar_t wtitle[128];
+                swprintf_s(wtitle, L"WS-Bot - %s [Lv.%d %s]", name.c_str(), level, GetClassName(classId));
+                SetWindowTextW(hWnd, wtitle);
+                // Rename debug console too
+                wchar_t dtitle[128];
+                swprintf_s(dtitle, L"Bot Console - %s", name.c_str());
+                SetConsoleTitleW(dtitle);
                 wchar_t m2[256];
                 swprintf_s(m2,L"Connected to PID %d!\n\nCharacter: %s\nLevel: %d\nClass: %s\nHP: %d/%d\nMana: %d/%d\nPlayers: %d  Mobs: %d  NPCs: %d\nCorpses: %d",
                     pid,name.c_str(),level,GetClassName(classId),hp,mhp,mn,mmn,(int)p.size(),(int)m.size(),(int)n.size(),(int)corpses.size());
@@ -1307,59 +1398,118 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam) {
             UpdateUI();
         }
 
-        if(wParam==2) { // Attack
+        if(wParam==2) { // Attack - full auto cycle
             HWND gw = FindGameWindow();
-            if(!gw || GetForegroundWindow()!=gw || IsIconic(gw)) {
-                static int atkSkipCount = 0;
-                atkSkipCount++;
-                if(atkSkipCount % 20 == 1)
-                    DebugLog("[ATK] SKIPPED: gw=%d fg=%d iconic=%d", gw!=NULL, gw?GetForegroundWindow()==gw:0, gw?IsIconic(gw):0);
-                break;
-            }
+            if(!gw || GetForegroundWindow()!=gw || IsIconic(gw)) break;
+            if(!g_hProcess) break;
+
+            // Skip if loot is walking (timer 4 owns the cursor)
+            if(g_hasPendingCorpse) break;
 
             wchar_t filter[64]={};
             GetWindowTextW(g_hAtkName, filter, 64);
             bool hasFilter = (filter[0] != 0);
 
-            if(g_selectedTargetAddr>0x1000&&g_hProcess) {
-                DWORD hp=0; SIZE_T r=0;
-                ReadProcessMemory(g_hProcess,(LPCVOID)(g_selectedTargetAddr+Game::ENT_HP),&hp,4,&r);
+            // Step 1: If no target, find first alive mob (verify from game memory)
+            if(g_selectedTargetAddr <= 0x1000) {
+                bool found=false;
+                for(auto&m:g_cachedMobs){
+                    if(m.hp<=0||IsNPC(m.name)||IsDeadAddr(m.objAddr)) continue;
+                    if(hasFilter && wcsstr(m.name, filter)==NULL) continue;
+                    // Verify mob is actually alive by reading HP from game memory
+                    DWORD liveHp=0; SIZE_T lr=0;
+                    ReadProcessMemory(g_hProcess,(LPCVOID)(m.objAddr+Game::ENT_HP),&liveHp,4,&lr);
+                    if(lr!=4 || liveHp<=0) continue;
+                    g_selectedTargetAddr=m.objAddr;
+                    wcscpy_s(g_selTargetName,m.name);
+                    DebugLog("[ATK] Auto-target: %S (0x%08X) HP=%d", m.name, m.objAddr, liveHp);
+                    found=true;
+                    break;
+                }
+                if(!found) break;
+            }
+
+            // Step 2: Check if current target is alive
+            DWORD hp=0; SIZE_T r=0;
+            ReadProcessMemory(g_hProcess,(LPCVOID)(g_selectedTargetAddr+Game::ENT_HP),&hp,4,&r);
+
+            if(r!=4 || hp<=0) {
+                // Target died - save corpse and find next
                 int rawX=0, rawY=0;
-                ReadProcessMemory(g_hProcess,(LPCVOID)(g_selectedTargetAddr+Game::ENT_RAW_X),&rawX,4,&r);
-                ReadProcessMemory(g_hProcess,(LPCVOID)(g_selectedTargetAddr+Game::ENT_RAW_Y),&rawY,4,&r);
+                SIZE_T r2=0;
+                ReadProcessMemory(g_hProcess,(LPCVOID)(g_selectedTargetAddr+Game::ENT_RAW_X),&rawX,4,&r2);
+                ReadProcessMemory(g_hProcess,(LPCVOID)(g_selectedTargetAddr+Game::ENT_RAW_Y),&rawY,4,&r2);
+                float cx = rawX / 65536.0f;
+                float cy = rawY / 65536.0f;
+
+                g_killCount++;
+                DebugLog("[ATK] Killed: %S | Kills=%d", g_selTargetName, g_killCount);
+
+                // Save corpse for auto-loot
+                if(g_autoLoot && r2==4 && (rawX!=0||rawY!=0)) {
+                    g_pendingCorpseX = cx;
+                    g_pendingCorpseY = cy;
+                    g_pendingCorpseAddr = g_selectedTargetAddr;
+                    wcscpy_s(g_pendingCorpseName, g_selTargetName);
+                    g_pendingCorpseTime = GetTickCount();
+                    g_hasPendingCorpse = true;
+                    DebugLog("[LOOT] Queue corpse: '%S' (%.1f, %.1f)", g_pendingCorpseName, cx, cy);
+                }
+
+                // Save dead address to avoid re-targeting
+                DWORD deadAddr = g_selectedTargetAddr;
+                MarkDead(deadAddr);
+
+                // Clear target
+                g_selectedTargetAddr = 0;
+                g_selTargetName[0] = 0;
+
+                // Find next alive mob (verify from game memory)
+                bool found=false;
+                for(auto&m:g_cachedMobs){
+                    if(m.hp<=0||IsNPC(m.name)||m.objAddr==deadAddr||IsDeadAddr(m.objAddr)) continue;
+                    if(hasFilter && wcsstr(m.name, filter)==NULL) continue;
+                    // Verify mob is actually alive
+                    DWORD liveHp=0; SIZE_T lr=0;
+                    ReadProcessMemory(g_hProcess,(LPCVOID)(m.objAddr+Game::ENT_HP),&liveHp,4,&lr);
+                    if(lr!=4 || liveHp<=0) continue;
+                    g_selectedTargetAddr=m.objAddr;
+                    wcscpy_s(g_selTargetName,m.name);
+                    DebugLog("[ATK] Next: %S (0x%08X) HP=%d", m.name, m.objAddr, liveHp);
+                    MoveToTile(m.x, m.y);
+                    found=true;
+                    break;
+                }
+                if(!found) {
+                    DebugLog("[ATK] All mobs dead%s", hasFilter ? " (filter)" : "");
+                    SetWindowTextW(g_hStatus, hasFilter ? L"  No matching mobs" : L"  All mobs dead");
+                }
+            } else {
+                // Target alive - attack with mouse click
+                int rawX=0, rawY=0;
+                SIZE_T r2=0;
+                ReadProcessMemory(g_hProcess,(LPCVOID)(g_selectedTargetAddr+Game::ENT_RAW_X),&rawX,4,&r2);
+                ReadProcessMemory(g_hProcess,(LPCVOID)(g_selectedTargetAddr+Game::ENT_RAW_Y),&rawY,4,&r2);
+                if(r2!=4||(rawX==0&&rawY==0)) break;
                 float mobGX = rawX / 65536.0f;
                 float mobGY = rawY / 65536.0f;
-                DebugLog("[ATK] target=0x%08X hp=%d name=%S game(%.1f,%.1f)", g_selectedTargetAddr, hp, g_selTargetName, mobGX, mobGY);
-                if(hp>0) {
-                    // Cursor-based attack: write mob position + Enter (same as follow)
+
+                // Convert to screen coords and click on mob
+                int mobCX, mobCY;
+                if(!GameToClient(mobGX, mobGY, mobCX, mobCY)) break;
+
+                // Check if mob is on screen
+                HWND gw2 = FindGameWindow();
+                RECT rc;
+                GetClientRect(gw2, &rc);
+                if(mobCX < 0 || mobCX > rc.right || mobCY < 0 || mobCY > rc.bottom) {
+                    // Mob off screen - walk toward it first
                     MoveToTile(mobGX, mobGY);
+                    DebugLog("[ATK] Off-screen, walking toward %S (%.1f,%.1f)", g_selTargetName, mobGX, mobGY);
                 } else {
-                    g_killCount++;
-                    DebugLog("[ATK] Target dead! Kills=%d name=%S", g_killCount, g_selTargetName);
-
-                    // Save corpse position for auto-loot
-                    if(g_autoLoot) {
-                        g_pendingCorpseX = mobGX;
-                        g_pendingCorpseY = mobGY;
-                        g_pendingCorpseAddr = g_selectedTargetAddr;
-                        wcscpy_s(g_pendingCorpseName, g_selTargetName);
-                        g_pendingCorpseTime = GetTickCount();
-                        g_hasPendingCorpse = true;
-                        DebugLog("[LOOT] Saved corpse: '%S' addr=0x%08X (%.1f, %.1f)", g_pendingCorpseName, g_pendingCorpseAddr, g_pendingCorpseX, g_pendingCorpseY);
-                    }
-
-                    bool found=false;
-                    for(auto&m:g_cachedMobs){
-                        if(m.hp<=0||IsNPC(m.name)||m.objAddr==g_selectedTargetAddr) continue;
-                        if(hasFilter && wcsstr(m.name, filter)==NULL) continue;
-                        DebugLog("[ATK] New target: %S (0x%08X) HP=%d/%d", m.name, m.objAddr, m.hp, m.maxHp);
-                        g_selectedTargetAddr=m.objAddr;wcscpy_s(g_selTargetName,m.name);
-                        MoveToTile(m.x, m.y);found=true;break;
-                    }
-                    if(!found) {
-                        DebugLog("[ATK] No more mobs alive%s", hasFilter ? " matching filter" : "");
-                        SetWindowTextW(g_hStatus, hasFilter ? L"  No matching mobs" : L"  No more mobs");
-                    }
+                    // Mob on screen - click to attack
+                    DebugLog("[ATK] Click: %S HP=%d client(%d,%d)", g_selTargetName, hp, mobCX, mobCY);
+                    ClickAtClient(mobCX, mobCY);
                 }
             }
         }
@@ -1411,37 +1561,51 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam) {
         }
 
         if(wParam==4) { // Auto Loot
-            if(!g_autoLoot || !g_hProcess) break;
+            if(!g_autoLoot || !g_hProcess) { g_hasPendingCorpse=false; break; }
             HWND w=FindGameWindow();
-            if(!w || GetForegroundWindow()!=w || IsIconic(w)) { break; }
+            if(!w || GetForegroundWindow()!=w || IsIconic(w)) { g_hasPendingCorpse=false; break; }
 
-            if(g_cachedCorpses.empty()) break;
+            // Use g_cachedCorpses if available, otherwise use g_hasPendingCorpse data
+            float lootX=0, lootY=0;
+            bool foundCorpse = false;
 
-            auto& c = g_cachedCorpses[0];
-            float dx = c.x - g_selfX;
-            float dy = c.y - g_selfY;
+            if(!g_cachedCorpses.empty()) {
+                auto& c = g_cachedCorpses[0];
+                lootX = c.x;
+                lootY = c.y;
+                foundCorpse = true;
+            } else if(g_hasPendingCorpse) {
+                // Corpse not yet in entity scan - use saved position from kill
+                lootX = g_pendingCorpseX;
+                lootY = g_pendingCorpseY;
+                foundCorpse = true;
+            }
+
+            if(!foundCorpse) { g_hasPendingCorpse=false; break; }
+
+            float dx = lootX - g_selfX;
+            float dy = lootY - g_selfY;
             float dist = sqrtf(dx*dx + dy*dy);
 
-            DebugLog("[LOOT] '%S' dist=%.1f addr=0x%08X game(%.1f,%.1f) self(%.1f,%.1f)", c.name, dist, c.objAddr, c.x, c.y, g_selfX, g_selfY);
+            DebugLog("[LOOT] dist=%.1f self(%.1f,%.1f) pending=%d corpses=%d", dist, g_selfX, g_selfY, g_hasPendingCorpse, (int)g_cachedCorpses.size());
 
             if(dist > 10.0f) {
-                // Walk toward corpse using cursor-based movement
-                DebugLog("[LOOT] Walk -> game(%.1f,%.1f)", c.x, c.y);
-                MoveToTile(c.x, c.y);
-                Sleep(500);
+                DebugLog("[LOOT] Walk -> (%.1f,%.1f)", lootX, lootY);
+                MoveToTile(lootX, lootY);
             } else {
                 int cx, cy;
-                if(GameToClient(c.x, c.y, cx, cy)) {
-                    DebugLog("[LOOT] Click corpse -> client(%d,%d)", cx, cy);
+                if(GameToClient(lootX, lootY, cx, cy)) {
+                    DebugLog("[LOOT] Click corpse client(%d,%d)", cx, cy);
                     ClickAtClient(cx, cy);
                     Sleep(400);
                     SendInputKey(VK_RETURN);
                     Sleep(300);
                     g_lootCount++;
-                    wcscpy_s(g_lastLootName, c.name);
+                    wcscpy_s(g_lastLootName, g_hasPendingCorpse ? g_pendingCorpseName : L"");
                     g_lastLootTime = GetTickCount();
-                    DebugLog("[LOOT] Done #%d '%S' | Kills=%d Loots=%d", g_lootCount, c.name, g_killCount, g_lootCount);
+                    DebugLog("[LOOT] Done #%d | K=%d L=%d", g_lootCount, g_killCount, g_lootCount);
                 }
+                g_hasPendingCorpse = false;
             }
         }
         break;

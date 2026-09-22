@@ -36,7 +36,7 @@ namespace Game {
     constexpr DWORD ENT_MANA      = 0x114;
     constexpr DWORD ENT_MAX_MANA  = 0x118;
     constexpr DWORD ENT_LEVEL     = 0x2E0;
-    constexpr DWORD ENT_CLASS_IND = 0x2D0;
+    constexpr DWORD ENT_CLASS_IND = 0x3ED;  // byte, not int!
     constexpr DWORD VT_PLAYER  = 0x00C80F9C;
     constexpr DWORD VT_BEAST   = 0x00C81490;
     constexpr DWORD VT_CORPSE  = 0x00C4FC5C;
@@ -203,25 +203,7 @@ bool ReadGameState(float& sx, float& sy, int& hp, int& mhp, int& mn, int& mmn,
     hp=Read<int>(lp+Game::ENT_HP); mhp=Read<int>(lp+Game::ENT_MAX_HP);
     mn=Read<int>(lp+Game::ENT_MANA); mmn=Read<int>(lp+Game::ENT_MAX_MANA);
     level=Read<int>(lp+Game::ENT_LEVEL);
-    classId=Read<int>(lp+Game::ENT_CLASS_IND);
-
-    // DEBUG: scan entity bytes to find correct class offset
-    static bool classDumped = false;
-    if(!classDumped) {
-        FILE* f = NULL;
-        fopen_s(&f, "class_dump.txt", "w");
-        if(f) {
-            fprintf(f, "Player=0x%08X current: level=%d classId=%d (off 0x2D0)\n", lp, level, classId);
-            for(DWORD off = 0x100; off <= 0x400; off++) {
-                BYTE b = Read<BYTE>(lp + off);
-                if(b >= 1 && b <= 20) {
-                    fprintf(f, "+0x%03X = %d\n", off, b);
-                }
-            }
-            fclose(f);
-        }
-        classDumped = true;
-    }
+    classId=Read<BYTE>(lp+Game::ENT_CLASS_IND);
     DWORD np2=Read<DWORD>(lp+Game::ENT_NAME_PTR); int nl=Read<int>(lp+Game::ENT_NAME_LEN);
     if(nl>0&&nl<64&&np2>0x1000){wchar_t w[64]={};for(int i=0;i<nl;i++){wchar_t c=Read<wchar_t>(np2+i*2);if(c==0)break;w[i]=c;}name=w;}
     else name=L"(unknown)";
@@ -465,6 +447,26 @@ void ClickAtClient(int cx, int cy) {
     SendInput(3,in,sizeof(INPUT));
 }
 
+void MoveMouseToClient(int cx, int cy) {
+    HWND w=FindGameWindow(); if(!w) return;
+    if(GetForegroundWindow()!=w || IsIconic(w)) return;
+    DWORD fgTid = GetWindowThreadProcessId(w, NULL);
+    DWORD myTid = GetCurrentThreadId();
+    AttachThreadInput(myTid, fgTid, TRUE);
+    SetForegroundWindow(w);
+    AttachThreadInput(myTid, fgTid, FALSE);
+    if(GetForegroundWindow()!=w) return;
+    POINT pt={cx,cy}; ClientToScreen(w,&pt);
+    int sx=GetSystemMetrics(SM_CXSCREEN), sy=GetSystemMetrics(SM_CYSCREEN);
+    if(pt.x<0||pt.x>=sx||pt.y<0||pt.y>=sy) return;
+    INPUT in={};
+    in.type=INPUT_MOUSE;
+    in.mi.dx=(LONG)(pt.x*65536.0/sx);
+    in.mi.dy=(LONG)(pt.y*65536.0/sy);
+    in.mi.dwFlags=MOUSEEVENTF_MOVE|MOUSEEVENTF_ABSOLUTE;
+    SendInput(1,&in,sizeof(INPUT));
+}
+
 void SendInputKey(WORD vk) {
     INPUT in[2]={};
     in[0].type=INPUT_KEYBOARD;
@@ -554,24 +556,18 @@ bool WriteCursorPos(WORD tileX, WORD tileY) {
         DebugLog("[CURSOR] Invalid cursor addr: 0x%08X", cur);
         return false;
     }
-    // Clamp to 0-27 (game uses max 27 tiles)
     if (tileX > 27) tileX = 27;
     if (tileY > 27) tileY = 27;
 
-    // Write tile coords
     Write<WORD>(cur + Game::CUR_X, tileX);
     Write<WORD>(cur + Game::CUR_Y, tileY);
 
-    // Write raw pixel position (tile * 0x180000 = tile * 1572864)
     int rawX = (int)tileX * 0x180000;
     int rawY = (int)tileY * 0x180000;
     Write<int>(cur + Game::CUR_RAW_X, rawX);
     Write<int>(cur + Game::CUR_RAW_Y, rawY);
 
-    // Write walk flag (0x10 = walk/default cursor state)
-    Write<DWORD>(cur + Game::CUR_FLAG, 0x10);
-
-    DebugLog("[CURSOR] Wrote tile(%d,%d) raw(%d,%d) flag=16", tileX, tileY, rawX, rawY);
+    DebugLog("[CURSOR] Wrote tile(%d,%d) raw(%d,%d)", tileX, tileY, rawX, rawY);
     return true;
 }
 
@@ -1525,9 +1521,28 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam) {
                     MoveToTile(mobGX, mobGY);
                     DebugLog("[ATK] Off-screen, walking toward %S (%.1f,%.1f)", g_selTargetName, mobGX, mobGY);
                 } else {
-                    // Mob on screen - click to attack
-                    DebugLog("[ATK] Click: %S HP=%d client(%d,%d)", g_selTargetName, hp, mobCX, mobCY);
-                    ClickAtClient(mobCX, mobCY);
+                    // Mob on screen - write cursor to mob's EXACT position + Enter to attack
+                    WORD tileX2 = (WORD)((int)(mobGX / 24.0f));
+                    WORD tileY2 = (WORD)((int)(mobGY / 24.0f));
+                    if(tileX2 > 27) tileX2 = 27;
+                    if(tileY2 > 27) tileY2 = 27;
+
+                    DWORD cur = GetCursorAddr();
+                    if(cur > 0x1000) {
+                        Write<WORD>(cur + Game::CUR_X, tileX2);
+                        Write<WORD>(cur + Game::CUR_Y, tileY2);
+                        int rawX = (int)(mobGX * 65536.0f);
+                        int rawY = (int)(mobGY * 65536.0f);
+                        Write<int>(cur + Game::CUR_RAW_X, rawX);
+                        Write<int>(cur + Game::CUR_RAW_Y, rawY);
+                        DebugLog("[ATK] Attack: %S HP=%d tile(%d,%d) raw(%d,%d)", g_selTargetName, hp, tileX2, tileY2, rawX, rawY);
+                        Sleep(50);
+                        HWND gw = FindGameWindow();
+                        if(gw && GetForegroundWindow()==gw && !IsIconic(gw)) {
+                            SendInputKey(VK_RETURN);
+                            DebugLog("[ATK] Enter sent");
+                        }
+                    }
                 }
             }
         }

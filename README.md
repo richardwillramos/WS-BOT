@@ -31,11 +31,10 @@ Bot de automação para Warspear Online (cliente 32-bit, private server). Funcio
 | Módulo | Descrição |
 |--------|-----------|
 | **Targeter** | Seleciona mob mais próximo, mantém alvo |
-| **Attacker** | Ataca alvo via setas do cursor + Enter |
+| **Attacker** | Ataca alvo via cursor memory writes + Enter remoto |
 | **Healer** | Cura o jogador quando HP cai abaixo do threshold |
-| **PartyHealer** | Cura membros do grupo |
+| **Follower** | Segue um player específico (seletor de lista na UI) |
 | **Looter** | Coleta corpos de mobs mortos |
-| **Follower** | Segue o jogador mais próximo |
 | **Extra** | Anti-AFK, auto-revive, auto-sell, auto-repair |
 
 ---
@@ -101,9 +100,11 @@ O cursor do jogo é acessível via `player + 0x123C`:
 
 | Offset | Tamanho | Descrição |
 |--------|---------|-----------|
-| `+0x00` | DWORD | Cursor X (tiles) |
-| `+0x04` | DWORD | Cursor Y (tiles) |
-| `+0x7C` | DWORD | Cursor action flag |
+| `+0x08` | WORD | Cursor X (tiles, WORD) |
+| `+0x0A` | WORD | Cursor Y (tiles, WORD) |
+| `+0x10` | DWORD | Raw X (escrita em memória para mover cursor) |
+| `+0x14` | DWORD | Raw Y (escrita em memória para mover cursor) |
+| `+0x7C` | BYTE | Cursor action flag |
 
 **Cursor action flags:**
 
@@ -112,6 +113,8 @@ O cursor do jogo é acessível via `player + 0x123C`:
 | `8` | ATTACK (cursor sobre mob hostil) |
 | `13` | MOVE (cursor em posição válida) |
 | `15` | NONE (cursor em posição inválida) |
+
+**Ataque via cursor memory write:** As coordenadas raw do mob são escritas diretamente em `cursor+0x10` e `cursor+0x14` via `WriteProcessMemory`, sem usar setas do teclado.
 
 ### Árvore de Entidades (BST)
 
@@ -135,35 +138,28 @@ O cursor do jogo é acessível via `player + 0x123C`:
 ### Coordenadas do Mundo
 
 - Zona size: 28 tiles (0-27)
-- Conversão raw→tile: `(raw / 65536) % 28`
+- Conversão world→tile: `tileX = rawX / 1572864` (raw / 65536 / 24)
+- Conversão raw→world: `worldX = rawX / 65536`
+- Conversão world→tile: `tileX = worldX / 24`
 
-### Strings Chave no Binário
-
-| Endereço | String |
-|----------|--------|
-| `0x00c77bf0` | `"LogicLoot"` |
-| `0x00c77bd8` | `"LogicLoot::sel_selector"` |
-| `0x00c59bb0` | `"icon_target_corpse"` |
-| `0x00c5ccd8` | `"player_corpse_u"` |
-| `0x00c59a5c` | `"icon_loot_all"` |
-
-### Funções Relevantes (Ghidra)
+### Funções Relevantes
 
 | Endereço | Função | Descrição |
 |----------|--------|-----------|
-| `0x00963AA0` | `FUN_00963aa0` | Loot selection handler |
-| `0x00963C80` | `FUN_00963c80` | Loot initialization |
-| `0x00A67580` | `FUN_00a67580` | Server object spawn handler |
-
----
+| `0x00A3F480` | `HandleMoveOrAction` | Processa movimento/ação do cursor (__thiscall localPlayer) |
+| `0x00A3E0F0` | `HandleSkillOrUse` | Processa skill/uso (__thiscall localPlayer, entityPtr) |
 
 ## Como o Ataque Funciona
 
 1. Targeter seleciona mob mais próximo com HP > 0
-2. Attacker usa setas do teclado para mover o cursor até a posição do mob
-3. Lê `cursor_action` em `cursor_ptr + 0x7C`
-4. Se `cursor_action == 8` (ATTACK) → pressiona Enter
-5. Se `cursor_action != 8` → move cursor com setas
+2. Attacker escreve coordenadas do mob direto na memória do cursor via `WriteProcessMemory`
+3. Lê `cursor_action` em `cursor_ptr + 0x7C` para verificar se é válido
+4. Se `cursor_action == 8` (ATTACK) → usa `CreateRemoteThread` + `keybd_event(VK_RETURN)` para gerar Enter real dentro do processo do jogo
+5. Se `cursor_action != 8` → continua movendo cursor
+
+### Por que não PostMessage?
+
+O Warspear Online usa DirectInput/raw input — `PostMessage` com `WM_KEYDOWN` não funciona. A solução é injetar um shellcode via `VirtualAllocEx` + `CreateRemoteThread` que chama `keybd_event(VK_RETURN)` dentro do processo-alvo, gerando input de nível OS que o jogo reconhece.
 
 ---
 
@@ -172,23 +168,22 @@ O cursor do jogo é acessível via `player + 0x123C`:
 ```
 WS-BOT/
 ├── controller/
-│   └── main.cpp                ← Controlador GUI (accordion UI)
+│   └── main.cpp                ← Controlador GUI (accordion UI, 6 módulos)
 │
 ├── include/
 │   ├── IModule.h               ← Interface dos módulos + GameContext
 │   ├── ModuleManager.h         ← Registro, persistência de config
-│   └── game_memory.h           ← Offsets, estruturas
+│   └── game_memory.h           ← Offsets, estruturas, cursor struct
 │
 ├── modules/
 │   ├── Targeter.h              ← Seleção de alvo
-│   ├── Attacker.h              ← Ataque via setas + Enter
+│   ├── Attacker.h              ← Ataque via cursor memory + remote keybd_event
 │   ├── Healer.h                ← Auto-cura
-│   ├── PartyHealer.h           ← Cura de grupo
 │   ├── Looter.h                ← Auto-loot
-│   ├── Follower.h              ← Seguir jogador
-│   └── Extra.h                 ← Anti-AFK, auto-revive, etc.
+│   ├── Follower.h              ← Seguir player específico (cursor memory + Enter)
+│   └── Extra.h                 ← Anti-AFK, auto-revive, auto-sell, auto-repair
 │
-├── dllmain.cpp                 ← DLL (setas do cursor via memória compartilhada)
+├── dllmain.cpp                 ← DLL (arrow-key nav via shared memory, referência)
 ├── build-controller-local.bat  ← Script de compilação do controller
 ├── build-dll.bat               ← Script de compilação da DLL
 └── README.md
@@ -226,8 +221,9 @@ build-controller-local.bat
 2. Abrir `warspear-controller.exe`
 3. Aba **Connection**: selecionar `warspear.exe` na lista e clicar **CONNECT**
 4. Aba **Config**: expandir módulos e ativar os desejados
-5. Aba **Quick**: atalhos ON/OFF para Attack, Heal, Follow
-6. O bot começa a trabalhar automaticamente
+5. **Follower**: clicar em "Target" para selecionar o player a seguir da lista de nearby
+6. Aba **Quick**: atalhos ON/OFF para Attack, Heal, Follow
+7. O bot começa a trabalhar automaticamente
 
 ---
 
@@ -243,6 +239,16 @@ Todos os timers verificam se o jogo está em foreground antes de agir:
 
 O bot suporta múltiplas instâncias do Warspear Online. Cada controller conecta a um PID diferente.
 
-### DLL (Opcional)
+### Accordion UI (6 módulos)
 
-`warspear-bot23.dll` pode ser injetada para ações adicionais via memória compartilhada (`Local\WarspearBotShared`). Usa arrow-key navigation via WriteProcessMemory no programa do jogo.
+A UI principal usa um accordion com 6 módulos (toggle + config inline):
+- **Targeter**: toggle + retarget + maxDistance
+- **Attacker**: toggle + cooldown
+- **Healer**: toggle + minHp% + healKey
+- **Follower**: toggle + target picker (lista de players nearby) + desiredDistance + maxDistance
+- **Looter**: toggle + radius
+- **Extra**: toggle + antiAFK + autoRevive + autoSell + autoRepair
+
+### DLL (Legacy)
+
+`warspear-bot23.dll` é uma versão legada que usava arrow-key navigation via shared memory. O controller atual não precisa dela — usa `WriteProcessMemory` + `CreateRemoteThread` diretamente.

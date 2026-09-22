@@ -694,6 +694,77 @@ int ShowInputInt(HWND parent, const wchar_t* title, int current) {
 }
 
 // ============================================================
+// UI: Selection list dialog (for picking players, etc.)
+// ============================================================
+static int g_selResult = -1;
+static HWND g_selParent = NULL;
+
+LRESULT CALLBACK SelListDlgProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    switch (m) {
+    case WM_CREATE: {
+        HWND hList = CreateWindowExW(0, L"listbox", L"",
+            WS_CHILD|WS_VISIBLE|WS_BORDER|WS_VSCROLL|LBS_NOTIFY,
+            10, 10, 300, 250, h, (HMENU)1101, g_hInst, NULL);
+        SendMessageW(hList, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+        // Populate list from stored data
+        extern std::vector<std::wstring> g_selListItems;
+        for (auto& item : g_selListItems)
+            SendMessageW(hList, LB_ADDSTRING, 0, (LPARAM)item.c_str());
+        if (!g_selListItems.empty())
+            SendMessageW(hList, LB_SETCURSEL, 0, 0);
+        SetFocus(hList);
+        CreateWindowExW(0, L"button", L"OK", WS_CHILD|WS_VISIBLE|BS_DEFPUSHBUTTON,
+            320, 10, 60, 24, h, (HMENU)1102, g_hInst, NULL);
+        CreateWindowExW(0, L"button", L"Cancel", WS_CHILD|WS_VISIBLE,
+            320, 40, 60, 24, h, (HMENU)1103, g_hInst, NULL);
+        break;
+    }
+    case WM_COMMAND:
+        if (LOWORD(w) == 1102 || (LOWORD(w) == 1101 && HIWORD(w) == LBN_DBLCLK)) {
+            HWND hList = GetDlgItem(h, 1101);
+            g_selResult = (int)SendMessageW(hList, LB_GETCURSEL, 0, 0);
+            DestroyWindow(h);
+        }
+        if (LOWORD(w) == 1103) { g_selResult = -1; DestroyWindow(h); }
+        break;
+    case WM_DESTROY:
+        if (g_selParent) { EnableWindow(g_selParent, TRUE); SetForegroundWindow(g_selParent); }
+        break;
+    }
+    return DefWindowProcW(h, m, w, l);
+}
+
+std::vector<std::wstring> g_selListItems;
+
+int ShowSelectionList(HWND parent, const wchar_t* title, const wchar_t* prompt,
+                      const std::vector<std::wstring>& items) {
+    g_selResult = -1;
+    g_selParent = parent;
+    g_selListItems = items;
+
+    WNDCLASSEXW wc{}; wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = SelListDlgProc;
+    wc.hInstance = g_hInst;
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+    wc.lpszClassName = L"SelListDlg";
+    RegisterClassExW(&wc);
+
+    EnableWindow(parent, FALSE);
+    HWND hDlg = CreateWindowExW(WS_EX_DLGMODALFRAME, L"SelListDlg", title,
+        WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU,
+        CW_USEDEFAULT, CW_USEDEFAULT, 400, 320,
+        parent ? parent : g_hWnd, NULL, g_hInst, NULL);
+    ShowWindow(hDlg, SW_SHOW); UpdateWindow(hDlg);
+    MSG msg{};
+    while (GetMessageW(&msg, NULL, 0, 0)) {
+        if (!IsWindow(hDlg)) break;
+        if (!IsDialogMessageW(hDlg, &msg)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
+    }
+    return g_selResult;
+}
+
+// ============================================================
 // UI: Accordion config - helpers
 // ============================================================
 void AccordionUpdateLabels(int mod);
@@ -729,10 +800,14 @@ void AccordionUpdateLabels(int mod) {
         break;
     case MID_FOLLOWER:
         setLabel(g_hModLabel[3][0], G->follower.enabled ? L"[ON] Click to toggle" : L"[OFF] Click to toggle");
-        swprintf(b,128,L"Target: %s", G->follower.targetName.empty() ? L"(none)" : G->follower.targetName.c_str());
+        if (G->follower.targetName.empty())
+            swprintf(b,128,L"Target: (click to select)");
+        else
+            swprintf(b,128,L"Target: %s (click to change)", G->follower.targetName.c_str());
         setLabel(g_hModLabel[3][1], b);
-        swprintf(b,128,L"Dist: %.0f", G->follower.desiredDistance);
+        swprintf(b,128,L"Dist: %.0f (click to edit)", G->follower.desiredDistance);
         setLabel(g_hModLabel[3][2], b);
+        setLabel(g_hModLabel[3][3], L"MaxDist: 30 (click to edit)");
         break;
     case MID_LOOTER:
         setLabel(g_hModLabel[4][0], G->looter.enabled ? L"[ON] Click to toggle" : L"[OFF] Click to toggle");
@@ -779,8 +854,32 @@ void AccordionHandleClick(int id) {
             break;
         case MID_FOLLOWER:
             if (sub == 0) { G->follower.enabled = !G->follower.enabled; AccordionUpdateLabels(mod); }
-            else if (sub == 1) { /* target name - read only */ }
+            else if (sub == 1) {
+                // Build list of nearby players for selection
+                std::vector<std::wstring> options;
+                options.push_back(L"(none) - clear target");
+                for (auto& p : G->cachedPlayers) {
+                    if (p.hp <= 0) continue;
+                    wchar_t entry[128];
+                    swprintf(entry, 128, L"%s (Lv.%d, HP:%d/%d, %.0fm)", p.name, p.level, p.hp, p.maxHp, p.distance);
+                    options.push_back(entry);
+                }
+                if (options.size() == 1) {
+                    MessageBoxW(g_hWnd, L"No players nearby to follow.", L"Follower", MB_OK|MB_ICONINFORMATION);
+                    break;
+                }
+                int sel = ShowSelectionList(g_hWnd, L"Select player to follow", L"Pick a target:", options);
+                if (sel == 0) {
+                    G->follower.targetName.clear();
+                    G->follower.targetAddr = 0;
+                } else if (sel > 0 && sel < (int)G->cachedPlayers.size() + 1) {
+                    G->follower.targetName = G->cachedPlayers[sel - 1].name;
+                    G->follower.targetAddr = G->cachedPlayers[sel - 1].objAddr;
+                }
+                AccordionUpdateLabels(mod);
+            }
             else if (sub == 2) { int v = ShowInputInt(g_hWnd, L"Desired Distance", (int)G->follower.desiredDistance); G->follower.desiredDistance = (float)v; AccordionUpdateLabels(mod); }
+            else if (sub == 3) { int v = ShowInputInt(g_hWnd, L"Max Distance", (int)G->follower.maxDistance); G->follower.maxDistance = (float)v; AccordionUpdateLabels(mod); }
             break;
         case MID_LOOTER:
             if (sub == 0) { G->looter.enabled = !G->looter.enabled; AccordionUpdateLabels(mod); }

@@ -204,6 +204,24 @@ bool ReadGameState(float& sx, float& sy, int& hp, int& mhp, int& mn, int& mmn,
     mn=Read<int>(lp+Game::ENT_MANA); mmn=Read<int>(lp+Game::ENT_MAX_MANA);
     level=Read<int>(lp+Game::ENT_LEVEL);
     classId=Read<int>(lp+Game::ENT_CLASS_IND);
+
+    // DEBUG: scan entity bytes to find correct class offset
+    static bool classDumped = false;
+    if(!classDumped) {
+        FILE* f = NULL;
+        fopen_s(&f, "class_dump.txt", "w");
+        if(f) {
+            fprintf(f, "Player=0x%08X current: level=%d classId=%d (off 0x2D0)\n", lp, level, classId);
+            for(DWORD off = 0x100; off <= 0x400; off++) {
+                BYTE b = Read<BYTE>(lp + off);
+                if(b >= 1 && b <= 20) {
+                    fprintf(f, "+0x%03X = %d\n", off, b);
+                }
+            }
+            fclose(f);
+        }
+        classDumped = true;
+    }
     DWORD np2=Read<DWORD>(lp+Game::ENT_NAME_PTR); int nl=Read<int>(lp+Game::ENT_NAME_LEN);
     if(nl>0&&nl<64&&np2>0x1000){wchar_t w[64]={};for(int i=0;i<nl;i++){wchar_t c=Read<wchar_t>(np2+i*2);if(c==0)break;w[i]=c;}name=w;}
     else name=L"(unknown)";

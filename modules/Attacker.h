@@ -67,17 +67,15 @@ public:
                 break;
             }
 
-            // Write cursor position directly (without walk flag)
+            // Write cursor position directly (without walk/attack flag - let game detect naturally)
             if (curPtr > 0x1000) {
                 short tx = mobTX, ty = mobTY;
                 int rawX = (int)mobTX * 0x180000;
                 int rawY = (int)mobTY * 0x180000;
-                DWORD noneFlag = 15;
                 WriteProcessMemory(ctx.hProcess, (LPVOID)(curPtr + 0x08), &tx, 2, NULL);
                 WriteProcessMemory(ctx.hProcess, (LPVOID)(curPtr + 0x0A), &ty, 2, NULL);
                 WriteProcessMemory(ctx.hProcess, (LPVOID)(curPtr + 0x10), &rawX, 4, NULL);
                 WriteProcessMemory(ctx.hProcess, (LPVOID)(curPtr + 0x14), &rawY, 4, NULL);
-                WriteProcessMemory(ctx.hProcess, (LPVOID)(curPtr + 0x7C), &noneFlag, 4, NULL);
             }
 
             attackStepTick = now;
@@ -103,19 +101,8 @@ public:
                 WriteProcessMemory(ctx.hProcess, (LPVOID)(ctx.playerAddr + 0x478), &ta, 4, NULL);
             }
 
-            // Send mouse click at cursor position (not Enter - game may ignore PostMessage keys)
-            HWND gw = ctx.gameWindow;
-            if (gw && IsWindow(gw)) {
-                POINT pt = { 0, 0 };
-                ClientToScreen(gw, &pt);
-                int centerX = pt.x + 120;
-                int centerY = pt.y + 200;
-                LPARAM lpClick = MAKELPARAM(centerX, centerY);
-
-                PostMessageW(gw, WM_LBUTTONDOWN, MK_LBUTTON, lpClick);
-                Sleep(30);
-                PostMessageW(gw, WM_LBUTTONUP, 0, lpClick);
-            }
+            // Send Enter via remote keybd_event (PostMessage doesn't reach DirectInput)
+            if (ctx.remoteSendEnter) ctx.remoteSendEnter();
 
             lastAttackTick = now;
             attackStepTick = now;

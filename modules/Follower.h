@@ -57,9 +57,6 @@ public:
         if (dist < desiredDistance) return;
 
         // Walk toward target using cursor + Enter
-        HWND gw = ctx.gameWindow;
-        if (!gw) return;
-
         WORD tileX = (WORD)((int)(tx / 24.0f));
         WORD tileY = (WORD)((int)(ty / 24.0f));
         if (tileX > 27) tileX = 27;
@@ -87,13 +84,7 @@ public:
             }
         }
 
-        if (gw && IsWindow(gw)) {
-            UINT scan = MapVirtualKeyW(VK_RETURN, MAPVK_VK_TO_VSC);
-            LPARAM keyDown = 1 | ((LPARAM)scan << 16);
-            LPARAM keyUp = keyDown | (1LL << 30) | (1LL << 31);
-            PostMessageW(gw, WM_KEYDOWN, VK_RETURN, keyDown);
-            PostMessageW(gw, WM_KEYUP, VK_RETURN, keyUp);
-        }
+        if (ctx.remoteSendEnter) ctx.remoteSendEnter();
         lastFollowTick = now;
     }
 

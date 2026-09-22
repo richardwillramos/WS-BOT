@@ -23,7 +23,6 @@
 #include "../modules/Targeter.h"
 #include "../modules/Attacker.h"
 #include "../modules/Healer.h"
-#include "../modules/PartyHealer.h"
 #include "../modules/Looter.h"
 #include "../modules/Follower.h"
 #include "../modules/Extra.h"
@@ -101,7 +100,6 @@ struct BotState {
     TargeterModule  targeter;
     AttackerModule  attacker;
     HealerModule    healer;
-    PartyHealerModule partyHealer;
     LooterModule    looter;
     FollowerModule  follower;
     ExtraModule     extra;
@@ -142,12 +140,12 @@ static HWND g_hTabBtn[3] = {};
 static HWND g_hTabPanel[3] = {};
 
 // Config tab - Accordion
-static HWND g_hModHeader[7] = {};
-static HWND g_hModPanel[7] = {};
-static HWND g_hModLabel[7][4] = {};
-static bool g_modExpanded[7] = {};
-static const wchar_t* MOD_NAMES[] = { L"Targeter", L"Attacker", L"Healer", L"PartyHealer", L"Looter", L"Follower", L"Extra" };
-enum { MID_TARGETER=0, MID_ATTACKER, MID_HEALER, MID_PHEALER, MID_LOOTER, MID_FOLLOWER, MID_EXTRA };
+static HWND g_hModHeader[6] = {};
+static HWND g_hModPanel[6] = {};
+static HWND g_hModLabel[6][4] = {};
+static bool g_modExpanded[6] = {};
+static const wchar_t* MOD_NAMES[] = { L"Targeter", L"Attacker", L"Healer", L"Follower", L"Looter", L"Extra" };
+enum { MID_TARGETER=0, MID_ATTACKER, MID_HEALER, MID_FOLLOWER, MID_LOOTER, MID_EXTRA };
 
 // Quick actions tab
 static HWND g_hQuickBtn[8] = {};
@@ -530,6 +528,54 @@ void RefreshProcesses(HWND hList) {
 }
 
 // ============================================================
+// Remote keybd_event via CreateRemoteThread
+// Generates real OS-level input inside the target process,
+// which DirectInput/raw input games actually process.
+// ============================================================
+static FARPROC g_keybdEventAddr = nullptr;
+
+void RemoteSendEnter() {
+    if (!g_hProcess || !g_keybdEventAddr) return;
+
+    // Resolve keybd_event address (same across processes due to shared user-mode pages)
+    if (!g_keybdEventAddr) {
+        HMODULE hUser32 = GetModuleHandleW(L"user32.dll");
+        if (hUser32) g_keybdEventAddr = GetProcAddress(hUser32, "keybd_event");
+    }
+    if (!g_keybdEventAddr) return;
+
+    // Shellcode:
+    //   mov esi, <keybd_event>
+    //   push 0; push 0; push 0; push 0x0D; call esi   (keybd_event down)
+    //   push 0; push 2; push 0; push 0x0D; call esi   (keybd_event up)
+    //   ret 4
+    BYTE sc[40];
+    int i = 0;
+    sc[i++] = 0xBE;                                    // mov esi, imm32
+    *(DWORD*)(sc + i) = (DWORD)g_keybdEventAddr; i += 4;
+    // keybd_event(VK_RETURN, 0, 0, 0)
+    sc[i++] = 0x6A; sc[i++] = 0x00;                    // push 0 (dwExtraInfo)
+    sc[i++] = 0x6A; sc[i++] = 0x00;                    // push 0 (dwFlags)
+    sc[i++] = 0x6A; sc[i++] = 0x00;                    // push 0 (bScan)
+    sc[i++] = 0x6A; sc[i++] = 0x0D;                    // push 0x0D (VK_RETURN)
+    sc[i++] = 0xFF; sc[i++] = 0xD6;                    // call esi
+    // keybd_event(VK_RETURN, 0, KEYEVENTF_KEYUP, 0)
+    sc[i++] = 0x6A; sc[i++] = 0x00;                    // push 0
+    sc[i++] = 0x6A; sc[i++] = 0x02;                    // push 2 (KEYEVENTF_KEYUP)
+    sc[i++] = 0x6A; sc[i++] = 0x00;                    // push 0
+    sc[i++] = 0x6A; sc[i++] = 0x0D;                    // push 0x0D
+    sc[i++] = 0xFF; sc[i++] = 0xD6;                    // call esi
+    sc[i++] = 0xC2; sc[i++] = 0x04; sc[i++] = 0x00;   // ret 4
+
+    LPVOID remote = VirtualAllocEx(g_hProcess, NULL, i, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!remote) return;
+    WriteProcessMemory(g_hProcess, remote, sc, i, NULL);
+    HANDLE ht = CreateRemoteThread(g_hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)remote, NULL, 0, NULL);
+    if (ht) { WaitForSingleObject(ht, 1000); CloseHandle(ht); }
+    VirtualFreeEx(g_hProcess, remote, 0, MEM_RELEASE);
+}
+
+// ============================================================
 // Build GameContext
 // ============================================================
 GameContext BuildContext() {
@@ -540,6 +586,7 @@ GameContext BuildContext() {
     ctx.playerAddr = g_playerAddr; ctx.gmAddr = g_gmAddr;
     ctx.gameWindow = FindGameWindow();
     ctx.tickCount = GetTickCount();
+    ctx.remoteSendEnter = RemoteSendEnter;
 
     if (g_playerAddr > 0x1000) {
         ctx.selfHp = Read<int>(g_playerAddr + Game::ENT_HP);
@@ -680,24 +727,23 @@ void AccordionUpdateLabels(int mod) {
         swprintf(b,128,L"Heal key: %d", G->healer.healKeyBind - 0x30);
         setLabel(g_hModLabel[2][2], b);
         break;
-    case MID_PHEALER:
-        setLabel(g_hModLabel[3][0], G->partyHealer.enabled ? L"[ON] Click to toggle" : L"[OFF] Click to toggle");
-        swprintf(b,128,L"Cooldown: %d ms", G->partyHealer.cooldownMs);
+    case MID_FOLLOWER:
+        setLabel(g_hModLabel[3][0], G->follower.enabled ? L"[ON] Click to toggle" : L"[OFF] Click to toggle");
+        swprintf(b,128,L"Target: %s", G->follower.targetName.empty() ? L"(none)" : G->follower.targetName.c_str());
         setLabel(g_hModLabel[3][1], b);
+        swprintf(b,128,L"Dist: %.0f", G->follower.desiredDistance);
+        setLabel(g_hModLabel[3][2], b);
         break;
     case MID_LOOTER:
         setLabel(g_hModLabel[4][0], G->looter.enabled ? L"[ON] Click to toggle" : L"[OFF] Click to toggle");
         swprintf(b,128,L"Radius: %d", (int)G->looter.radius);
         setLabel(g_hModLabel[4][1], b);
         break;
-    case MID_FOLLOWER:
-        setLabel(g_hModLabel[5][0], G->follower.enabled ? L"[ON] Click to toggle" : L"[OFF] Click to toggle");
-        break;
     case MID_EXTRA:
-        setLabel(g_hModLabel[6][0], G->extra.antiAfk ? L"Anti AFK: ON" : L"Anti AFK: OFF");
-        setLabel(g_hModLabel[6][1], G->extra.autoRevive ? L"Auto Revive: ON" : L"Auto Revive: OFF");
-        setLabel(g_hModLabel[6][2], G->extra.autoSell ? L"Auto Sell: ON" : L"Auto Sell: OFF");
-        setLabel(g_hModLabel[6][3], G->extra.autoRepair ? L"Auto Repair: ON" : L"Auto Repair: OFF");
+        setLabel(g_hModLabel[5][0], G->extra.antiAfk ? L"Anti AFK: ON" : L"Anti AFK: OFF");
+        setLabel(g_hModLabel[5][1], G->extra.autoRevive ? L"Auto Revive: ON" : L"Auto Revive: OFF");
+        setLabel(g_hModLabel[5][2], G->extra.autoSell ? L"Auto Sell: ON" : L"Auto Sell: OFF");
+        setLabel(g_hModLabel[5][3], G->extra.autoRepair ? L"Auto Repair: ON" : L"Auto Repair: OFF");
         break;
     }
     wchar_t hdr[64];
@@ -709,13 +755,13 @@ void AccordionUpdateLabels(int mod) {
 // UI: Accordion config - handle clicks
 // ============================================================
 void AccordionHandleClick(int id) {
-    if (id >= IDM_MOD_HEADER && id < IDM_MOD_HEADER + 7) {
+    if (id >= IDM_MOD_HEADER && id < IDM_MOD_HEADER + 6) {
         AccordionToggleModule(id - IDM_MOD_HEADER);
         return;
     }
     int mod = (id - IDM_MOD_TOGGLE) / 10;
     int sub = (id - IDM_MOD_TOGGLE) % 10;
-    if (id >= IDM_MOD_TOGGLE && id < IDM_MOD_TOGGLE + 70) {
+    if (id >= IDM_MOD_TOGGLE && id < IDM_MOD_TOGGLE + 60) {
         switch (mod) {
         case MID_TARGETER:
             if (sub == 0) { G->targeter.enabled = !G->targeter.enabled; AccordionUpdateLabels(mod); }
@@ -731,16 +777,14 @@ void AccordionHandleClick(int id) {
             else if (sub == 1) { int v = ShowInputInt(g_hWnd, L"Min HP%", (int)G->healer.minHpPct); G->healer.minHpPct = (float)v; AccordionUpdateLabels(mod); }
             else if (sub == 2) { int v = ShowInputInt(g_hWnd, L"Heal Key (1-9)", G->healer.healKeyBind - 0x30); if(v>=1&&v<=9) G->healer.healKeyBind = 0x30+v; AccordionUpdateLabels(mod); }
             break;
-        case MID_PHEALER:
-            if (sub == 0) { G->partyHealer.enabled = !G->partyHealer.enabled; AccordionUpdateLabels(mod); }
-            else if (sub == 1) { int v = ShowInputInt(g_hWnd, L"Cooldown (ms)", G->partyHealer.cooldownMs); G->partyHealer.cooldownMs = v; AccordionUpdateLabels(mod); }
+        case MID_FOLLOWER:
+            if (sub == 0) { G->follower.enabled = !G->follower.enabled; AccordionUpdateLabels(mod); }
+            else if (sub == 1) { /* target name - read only */ }
+            else if (sub == 2) { int v = ShowInputInt(g_hWnd, L"Desired Distance", (int)G->follower.desiredDistance); G->follower.desiredDistance = (float)v; AccordionUpdateLabels(mod); }
             break;
         case MID_LOOTER:
             if (sub == 0) { G->looter.enabled = !G->looter.enabled; AccordionUpdateLabels(mod); }
             else if (sub == 1) { int v = ShowInputInt(g_hWnd, L"Loot Radius", (int)G->looter.radius); G->looter.radius = (float)v; AccordionUpdateLabels(mod); }
-            break;
-        case MID_FOLLOWER:
-            if (sub == 0) { G->follower.enabled = !G->follower.enabled; AccordionUpdateLabels(mod); }
             break;
         case MID_EXTRA:
             if (sub == 0) { G->extra.antiAfk = !G->extra.antiAfk; AccordionUpdateLabels(mod); }
@@ -811,7 +855,7 @@ void CreateConfigPanel(HWND parent) {
         WS_CHILD|WS_VSCROLL, 0, 26, 350, 544, parent, NULL, g_hInst, NULL);
 
     int bw = 330, bh = 22, y = 2;
-    for (int m = 0; m < 7; m++) {
+    for (int m = 0; m < 6; m++) {
         g_hModHeader[m] = CreateWindowExW(0, L"BUTTON", L"",
             WS_CHILD|WS_VISIBLE|BS_LEFT|BS_FLAT,
             4, y, bw, bh, g_hTabPanel[TAB_CONFIG], (HMENU)(IDM_MOD_HEADER + m), g_hInst, NULL);
@@ -834,7 +878,7 @@ void CreateConfigPanel(HWND parent) {
 }
 
 void RefreshAccordion() {
-    for (int m = 0; m < 7; m++) {
+    for (int m = 0; m < 6; m++) {
         AccordionUpdateLabels(m);
         ShowWindow(g_hModPanel[m], g_modExpanded[m] ? SW_SHOW : SW_HIDE);
     }
@@ -936,9 +980,13 @@ void UpdateUI() {
     }
 
     GameContext ctx = BuildContext();
+    G->modMgr.TickAll(ctx);
+
+    // Sync AFTER TickAll so Targeter has already updated selectedAddr
     if (G->targeter.enabled && G->targeter.selectedAddr > 0x1000)
         G->attacker.targetAddr = G->targeter.selectedAddr;
-    G->modMgr.TickAll(ctx);
+    else if (G->targeter.enabled)
+        G->attacker.targetAddr = 0;
 }
 
 // ============================================================
@@ -960,9 +1008,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         G->modMgr.Add(&G->targeter);
         G->modMgr.Add(&G->attacker);
         G->modMgr.Add(&G->healer);
-        G->modMgr.Add(&G->partyHealer);
-        G->modMgr.Add(&G->looter);
         G->modMgr.Add(&G->follower);
+        G->modMgr.Add(&G->looter);
         G->modMgr.Add(&G->extra);
 
         wchar_t cfgDir[MAX_PATH];
@@ -1030,7 +1077,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         case IDM_STOP_ALL:
             G->targeter.enabled = false; G->attacker.enabled = false;
-            G->healer.enabled = false; G->partyHealer.enabled = false;
+            G->healer.enabled = false;
             G->looter.enabled = false; G->follower.enabled = false;
             G->extra.enabled = false;
             G->attacker.targetAddr = 0; G->follower.targetAddr = 0;

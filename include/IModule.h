@@ -18,6 +18,7 @@ struct GameContext {
     DWORD playerAddr, gmAddr;
     HWND  gameWindow;
     DWORD tickCount;
+    void  (*remoteSendEnter)() = nullptr;
 };
 
 class IModule {

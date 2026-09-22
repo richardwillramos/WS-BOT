@@ -242,6 +242,7 @@ static std::vector<CorpseData> g_cachedCorpses;
 static float g_selfX=0, g_selfY=0;
 static float g_scale=3.5f;  // pixels per game unit, adjustable via F5/F6
 static bool g_connected=false;
+static bool g_followPaused=false;  // true when target lost due to zone change
 static bool g_dllInjected=false;
 static wchar_t g_attackMobFilter[64]={};
 static bool g_autoLoot=false;
@@ -620,6 +621,26 @@ void FollowTarget() {
     MoveToTile(tx, ty);
 }
 
+// Find a player entity by name in the current entity tree
+// Returns the entity's objAddr if found, 0 otherwise
+DWORD FindPlayerByName(const wchar_t* name) {
+    if (!name || name[0] == 0 || !g_hProcess) return 0;
+    DWORD gmPtr = Read<DWORD>(Game::GM_PTR); if (gmPtr <= 0x1000) return 0;
+    DWORD gm = Read<DWORD>(gmPtr + Game::GM_OFFSET); if (gm <= 0x1000) return 0;
+    DWORD th = Read<DWORD>(gm + Game::ENTITY_TREE); if (th <= 0x1000) return 0;
+    DWORD root = Read<DWORD>(th + Game::TH_ROOT);
+    std::vector<EntityData> all;
+    std::vector<CorpseData> corpses;
+    TraverseTree(root, all, corpses, g_selfX, g_selfY);
+    for (auto& e : all) {
+        if (e.type == 1 && wcscmp(e.name, name) == 0) {
+            DebugLog("[FOLLOW] Found player '%S' at addr=0x%08X dist=%.1f", name, e.objAddr, e.distance);
+            return e.objAddr;
+        }
+    }
+    return 0;
+}
+
 // ============================================================
 // Process listing
 // ============================================================
@@ -783,7 +804,13 @@ void UpdateUI() {
             swprintf_s(buf,L"%s  (0x%X)",p.name,p.objAddr); SetWindowTextW(g_hFollowName,buf);
             swprintf_s(buf,L"Dist: %.1f  |  HP: %d/%d",p.distance,p.hp,p.maxHp); SetWindowTextW(g_hFollowDist,buf);
             f=true;break;}}
-        if(!f){SetWindowTextW(g_hFollowName,L"(player left area)");SetWindowTextW(g_hFollowDist,L"");}
+        if(!f){
+            if(g_followPaused){SetWindowTextW(g_hFollowName,L"(searching - zone change)");SetWindowTextW(g_hFollowDist,L"");}
+            else{SetWindowTextW(g_hFollowName,L"(player left area)");SetWindowTextW(g_hFollowDist,L"");}
+        }
+    } else if(g_followPaused && g_followName[0]!=0){
+        swprintf_s(buf,L"%s  (searching...)",g_followName); SetWindowTextW(g_hFollowName,buf);
+        SetWindowTextW(g_hFollowDist,L"");
     }
 
     g_cachedMobs=mb;
@@ -1003,7 +1030,7 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam) {
             break;
         }
 
-        // Mob double-click -> select target
+        // Mob double-click -> select target AND start attack
         if((HWND)lParam==g_hMobList&&code==LBN_DBLCLK) {
             int sel=(int)SendMessageW(g_hMobList,LB_GETCURSEL,0,0);
             if(sel!=LB_ERR&&sel>=0&&sel<(int)g_cachedMobs.size()){
@@ -1018,9 +1045,14 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam) {
                         wchar_t s[128]; swprintf_s(s,L"  Target: %s (DLL attack ON)",m.name);
                         SetWindowTextW(g_hStatus,s);
                     } else {
-                        bool ok=WriteGameTarget(m.objAddr);
-                        DebugLog("[TARGET] Direct write: %s", ok ? "OK" : "FAILED");
-                        wchar_t s[128]; swprintf_s(s,L"  Target: %s %s",m.name,ok?L"(set)":L"(write failed)");
+                        WriteGameTarget(m.objAddr);
+                        // Auto-start attack timer if not running
+                        if(SendMessage(g_hChkAttack,BM_GETCHECK,0,0)!=BST_CHECKED){
+                            SendMessageW(g_hChkAttack,BM_SETCHECK,BST_CHECKED,0);
+                            SetTimer(hWnd,2,1500,NULL);
+                            DebugLog("[TARGET] Auto attack timer started");
+                        }
+                        wchar_t s[128]; swprintf_s(s,L"  Attacking: %s",m.name);
                         SetWindowTextW(g_hStatus,s);
                     }
                 }
@@ -1060,7 +1092,7 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam) {
             break;
         }
         if(id==3002){
-            g_followTargetAddr=0;g_followName[0]=0;
+            g_followTargetAddr=0;g_followName[0]=0;g_followPaused=false;
             if(g_pBotCmd){g_pBotCmd->followOn=0;g_pBotCmd->followAddr=0;}
             SendMessageW(g_hChkFollow,BM_SETCHECK,BST_UNCHECKED,0);KillTimer(hWnd,3);
             SetWindowTextW(g_hFollowName,L"(double-click a player to follow)");SetWindowTextW(g_hFollowDist,L"");
@@ -1162,7 +1194,7 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam) {
                 SendMessage(g_hChkAttack,BM_SETCHECK,BST_UNCHECKED,0);
                 SendMessage(g_hChkFollow,BM_SETCHECK,BST_UNCHECKED,0);
                 SendMessage(g_hChkLoot,BM_SETCHECK,BST_UNCHECKED,0);
-                g_selectedTargetAddr=0; g_followTargetAddr=0; g_autoLoot=false;
+                g_selectedTargetAddr=0; g_followTargetAddr=0; g_autoLoot=false; g_followPaused=false;
                 wcscpy_s(g_selTargetName,L""); wcscpy_s(g_followName,L"");
                 if(g_pBotCmd){
                     g_pBotCmd->attackOn=0;g_pBotCmd->followOn=0;
@@ -1299,8 +1331,8 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam) {
                 float mobGY = rawY / 65536.0f;
                 DebugLog("[ATK] target=0x%08X hp=%d name=%S game(%.1f,%.1f)", g_selectedTargetAddr, hp, g_selTargetName, mobGX, mobGY);
                 if(hp>0) {
-                    // Mouse-based attack: click ground -> hover mob -> click mob
-                    AttackMob(g_selectedTargetAddr, mobGX, mobGY);
+                    // Cursor-based attack: write mob position + Enter (same as follow)
+                    MoveToTile(mobGX, mobGY);
                 } else {
                     g_killCount++;
                     DebugLog("[ATK] Target dead! Kills=%d name=%S", g_killCount, g_selTargetName);
@@ -1322,7 +1354,7 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam) {
                         if(hasFilter && wcsstr(m.name, filter)==NULL) continue;
                         DebugLog("[ATK] New target: %S (0x%08X) HP=%d/%d", m.name, m.objAddr, m.hp, m.maxHp);
                         g_selectedTargetAddr=m.objAddr;wcscpy_s(g_selTargetName,m.name);
-                        AttackMob(m.objAddr, m.x, m.y);found=true;break;
+                        MoveToTile(m.x, m.y);found=true;break;
                     }
                     if(!found) {
                         DebugLog("[ATK] No more mobs alive%s", hasFilter ? " matching filter" : "");
@@ -1343,11 +1375,35 @@ LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam) {
                 DebugLog("[FOLLOW TIMER] addr=0x%08X r=%d rx=%d ry=%d name=%S", g_followTargetAddr, (int)r, rx, ry, g_followName);
                 if(r==4&&(rx!=0||ry!=0)) {
                     FollowTarget();
+                    g_followPaused = false;
                 } else {
-                    DebugLog("[FOLLOW] Target lost - raw read failed");
-                    g_followTargetAddr=0; KillTimer(hWnd,3);
-                    SendMessageW(g_hChkFollow,BM_SETCHECK,BST_UNCHECKED,0);
-                    SetWindowTextW(g_hStatus,L"  Follow target lost");
+                    // Address invalid - player may have changed zone
+                    // Try to find them by name in the current entity tree
+                    DWORD newAddr = FindPlayerByName(g_followName);
+                    if (newAddr > 0x1000) {
+                        g_followTargetAddr = newAddr;
+                        g_followPaused = false;
+                        DebugLog("[FOLLOW] Reconnected to '%S' at new addr=0x%08X", g_followName, newAddr);
+                        SetWindowTextW(g_hStatus, L"  Follow: reconnected after zone change");
+                        FollowTarget();
+                    } else {
+                        // Player not found yet - keep searching (don't cancel)
+                        if (!g_followPaused) {
+                            g_followPaused = true;
+                            DebugLog("[FOLLOW] Target '%S' not found, searching...", g_followName);
+                            SetWindowTextW(g_hStatus, L"  Follow: searching for target...");
+                        }
+                    }
+                }
+            } else if (g_followPaused && g_followName[0] != 0) {
+                // Was paused, keep trying to find the player
+                DWORD newAddr = FindPlayerByName(g_followName);
+                if (newAddr > 0x1000) {
+                    g_followTargetAddr = newAddr;
+                    g_followPaused = false;
+                    DebugLog("[FOLLOW] Found '%S' after pause at addr=0x%08X", g_followName, newAddr);
+                    SetWindowTextW(g_hStatus, L"  Follow: reconnected!");
+                    FollowTarget();
                 }
             } else {
                 DebugLog("[FOLLOW TIMER] invalid addr=0x%08X process=%d", g_followTargetAddr, g_hProcess!=NULL);

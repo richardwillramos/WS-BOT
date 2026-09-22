@@ -81,6 +81,8 @@ public:
                     int rawY = (int)tileY * 0x180000;
                     WriteProcessMemory(ctx.hProcess, (LPVOID)(cur + 0x10), &rawX, 4, NULL);
                     WriteProcessMemory(ctx.hProcess, (LPVOID)(cur + 0x14), &rawY, 4, NULL);
+                    DWORD walkFlag = 0x10;
+                    WriteProcessMemory(ctx.hProcess, (LPVOID)(cur + 0x7C), &walkFlag, 4, NULL);
                 }
             }
         }

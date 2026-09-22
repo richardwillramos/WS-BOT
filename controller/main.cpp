@@ -1,5 +1,6 @@
 // warspear-controller/main.cpp
-// Warspear Bot Controller v4 - Modular Architecture
+// Warspear Bot Controller v5 - Compact tree UI
+// All complex globals heap-allocated to avoid CRT static init crash.
 
 #include <Windows.h>
 #include <CommCtrl.h>
@@ -11,9 +12,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdarg>
+#include <commdlg.h>
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "psapi.lib")
+#pragma comment(lib, "comdlg32.lib")
 
 #include "../include/IModule.h"
 #include "../include/ModuleManager.h"
@@ -84,15 +87,45 @@ struct CorpseData {
     WORD objectId, typeId;
 };
 
+struct ProcInfo { DWORD pid; std::wstring name; };
+
+struct BotCmd {
+    volatile long attackOn, followOn, healOn, healThreshold, targetAddr, followAddr;
+};
+
 // ============================================================
-// Globals
+// Heap-allocated global state
+// ============================================================
+struct BotState {
+    ModuleManager modMgr;
+    TargeterModule  targeter;
+    AttackerModule  attacker;
+    HealerModule    healer;
+    PartyHealerModule partyHealer;
+    LooterModule    looter;
+    FollowerModule  follower;
+    ExtraModule     extra;
+
+    std::vector<EntityData> cachedMobs, cachedPlayers, cachedNpcs;
+    std::vector<CorpseData> cachedCorpses;
+    std::vector<ProcInfo> procs;
+    std::vector<int> listToProc;
+
+    IModule* activeModule = nullptr;
+    BotCmd*  pBotCmd = nullptr;
+    HANDLE   hSharedMem = NULL;
+};
+
+static BotState* G = nullptr;
+
+// ============================================================
+// Simple globals
 // ============================================================
 static HINSTANCE g_hInst = NULL;
 static HWND g_hWnd = NULL;
-static HMENU g_hMenu = NULL;
 static HWND g_hStatus = NULL;
-static HWND g_hTreeView = NULL;
-static HWND g_hDetailPanel = NULL;
+static HFONT g_hFont = NULL;
+static HFONT g_hTreeFont = NULL;
 
 static HANDLE g_hProcess = NULL;
 static DWORD  g_gamePid  = 0;
@@ -100,55 +133,53 @@ static bool   g_connected = false;
 static bool   g_dllInjected = false;
 static float  g_selfX = 0, g_selfY = 0;
 static float  g_scale = 3.5f;
+static DWORD  g_playerAddr = 0, g_gmAddr = 0;
 
-static std::vector<EntityData> g_cachedMobs, g_cachedPlayers, g_cachedNpcs;
-static std::vector<CorpseData> g_cachedCorpses;
-static DWORD g_playerAddr = 0, g_gmAddr = 0;
+// Tab system
+enum TabID { TAB_CONFIG = 0, TAB_QUICK = 1, TAB_CONN = 2 };
+static int g_currentTab = TAB_CONFIG;
+static HWND g_hTabBtn[3] = {};
+static HWND g_hTabPanel[3] = {};
 
-// Module manager
-static ModuleManager g_modMgr;
-static TargeterModule  g_targeter;
-static AttackerModule  g_attacker;
-static HealerModule    g_healer;
-static PartyHealerModule g_partyHealer;
-static LooterModule    g_looter;
-static FollowerModule  g_follower;
-static ExtraModule     g_extra;
+// Config tab - Accordion
+static HWND g_hModHeader[7] = {};
+static HWND g_hModPanel[7] = {};
+static HWND g_hModLabel[7][4] = {};
+static bool g_modExpanded[7] = {};
+static const wchar_t* MOD_NAMES[] = { L"Targeter", L"Attacker", L"Healer", L"PartyHealer", L"Looter", L"Follower", L"Extra" };
+enum { MID_TARGETER=0, MID_ATTACKER, MID_HEALER, MID_PHEALER, MID_LOOTER, MID_FOLLOWER, MID_EXTRA };
 
-// Active module UI panel
-static IModule* g_activeModule = nullptr;
-
-// Process listing
-struct ProcInfo { DWORD pid; std::wstring name; };
-static std::vector<ProcInfo> g_procs;
-static std::vector<int> g_listToProc;
-
-// DLL shared memory
-struct BotCmd {
-    volatile long attackOn, followOn, healOn, healThreshold, targetAddr, followAddr;
+// Quick actions tab
+static HWND g_hQuickBtn[8] = {};
+static const wchar_t* QUICK_LABELS[] = {
+    L"Toggle Attack [F1]", L"Toggle Heal [F2]", L"Toggle Follow [F3]",
+    L"Toggle Loot [F4]", L"Toggle All ON", L"STOP ALL", L"Scale + [F5]", L"Scale - [F6]"
 };
-static HANDLE g_hSharedMem = NULL;
-static BotCmd* g_pBotCmd = NULL;
+enum { QID_ATK=0, QID_HEAL, QID_FOLLOW, QID_LOOT, QID_ALL, QID_STOP, QID_SCP, QID_SCN };
+
+// Connection tab
+static HWND g_hProcList = NULL;
+static HWND g_hBtnRefresh = NULL;
+static HWND g_hBtnConnect = NULL;
+static HWND g_hDllPath = NULL;
+static HWND g_hBtnBrowse = NULL;
+static HWND g_hBtnInject = NULL;
+
+// Debug console
+static HWND g_hDebugConsole = NULL;
+static HWND g_hDebugEdit = NULL;
+static bool g_debugConsoleOpen = false;
 
 // Menu IDs
 enum MenuID {
-    IDM_CONFIG = 1001,
-    IDM_QUICK,
-    IDM_CONNECTION,
-    IDM_REFRESH,
-    IDM_CONNECT,
-    IDM_INJECT,
-    IDM_BROWSE_DLL,
-    IDM_TOGGLE_ATTACK,
-    IDM_TOGGLE_FOLLOW,
-    IDM_TOGGLE_LOOT,
-    IDM_TOGGLE_HEAL,
-    IDM_TOGGLE_ALL,
-    IDM_STOP_ALL,
-    IDM_SCALE_UP,
-    IDM_SCALE_DOWN,
-    IDM_DEBUG,
-    IDM_EXIT,
+    IDM_TOGGLE_ATTACK = 2001, IDM_TOGGLE_HEAL, IDM_TOGGLE_FOLLOW, IDM_TOGGLE_LOOT,
+    IDM_TOGGLE_ALL, IDM_STOP_ALL, IDM_REFRESH, IDM_CONNECT, IDM_INJECT,
+    IDM_BROWSE_DLL, IDM_DEBUG, IDM_SCALE_UP, IDM_SCALE_DOWN, IDM_EXIT,
+};
+enum {
+    IDM_MOD_HEADER = 4000,
+    IDM_MOD_TOGGLE = 4100,
+    IDM_MOD_VALUE  = 4200,
 };
 
 // ============================================================
@@ -204,6 +235,133 @@ const wchar_t* GetClassName(int classId) {
 }
 
 // ============================================================
+// Debug console
+// ============================================================
+void DebugLog(const char* fmt, ...) {
+    char buf[1024];
+    va_list args; va_start(args, fmt);
+    _vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+    OutputDebugStringA(buf); OutputDebugStringA("\n");
+    if (g_hDebugEdit) {
+        int len = GetWindowTextLengthA(g_hDebugEdit);
+        SendMessageA(g_hDebugEdit, EM_SETSEL, len, len);
+        SendMessageA(g_hDebugEdit, EM_REPLACESEL, FALSE, (LPARAM)buf);
+        SendMessageA(g_hDebugEdit, EM_SETSEL, len + (int)strlen(buf), len + (int)strlen(buf));
+        SendMessageA(g_hDebugEdit, EM_SCROLLCARET, 0, 0);
+    }
+}
+
+void OpenDebugConsole(HWND parent) {
+    if (g_debugConsoleOpen) return;
+    WNDCLASSEXW wc{}; wc.cbSize=sizeof(wc);
+    wc.lpfnWndProc=DefWindowProcW; wc.hInstance=g_hInst;
+    wc.hCursor=LoadCursor(NULL,IDC_ARROW);
+    wc.hbrBackground=(HBRUSH)(COLOR_BTNFACE+1);
+    wc.lpszClassName=L"DebugConsoleWnd";
+    RegisterClassExW(&wc);
+    g_hDebugConsole = CreateWindowExW(WS_EX_TOOLWINDOW, L"DebugConsoleWnd",
+        L"Bot Debug Console", WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX,
+        parent ? 700 : CW_USEDEFAULT, parent ? 50 : CW_USEDEFAULT,
+        550, 400, parent, NULL, g_hInst, NULL);
+    g_hDebugEdit = CreateWindowExW(0, L"EDIT", L"",
+        WS_CHILD|WS_VISIBLE|WS_VSCROLL|ES_MULTILINE|ES_AUTOVSCROLL|ES_READONLY,
+        5, 5, 535, 355, g_hDebugConsole, NULL, g_hInst, NULL);
+    HFONT hMono = CreateFontW(-12, 0, 0, 0, FW_NORMAL, 0, 0, 0,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        DEFAULT_QUALITY, FIXED_PITCH|FF_MODERN, L"Consolas");
+    SendMessageW(g_hDebugEdit, WM_SETFONT, (WPARAM)hMono, TRUE);
+    ShowWindow(g_hDebugConsole, SW_SHOW);
+    UpdateWindow(g_hDebugConsole);
+    g_debugConsoleOpen = true;
+    DebugLog("=== Bot Debug Console Started ===");
+    DebugLog("PID: %d", g_gamePid);
+}
+
+// ============================================================
+// Font helpers
+// ============================================================
+void InitFont() {
+    g_hFont = CreateFontW(-11, 0, 0, 0, FW_NORMAL, 0, 0, 0,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        DEFAULT_QUALITY, DEFAULT_PITCH|FF_SWISS, L"Segoe UI");
+    g_hTreeFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+}
+void SetFont(HWND h) { SendMessageW(h, WM_SETFONT, (WPARAM)g_hFont, TRUE); }
+void SetTreeFont(HWND h) { SendMessageW(h, WM_SETFONT, (WPARAM)g_hTreeFont, TRUE); }
+
+// ============================================================
+// Find game window (PID-based)
+// ============================================================
+HWND FindGameWindow() {
+    if (g_gamePid) {
+        struct Ctx { DWORD pid; HWND h; } ctx = { g_gamePid, NULL };
+        EnumWindows([](HWND h, LPARAM lp) -> BOOL {
+            auto c = (Ctx*)lp; DWORD p = 0; GetWindowThreadProcessId(h, &p);
+            if (p == c->pid && IsWindowVisible(h)) { c->h = h; return FALSE; }
+            return TRUE;
+        }, (LPARAM)&ctx);
+        return ctx.h;
+    }
+    return NULL;
+}
+
+// ============================================================
+// Game interaction helpers
+// ============================================================
+DWORD GetCursorAddr() {
+    DWORD gmPtr = Read<DWORD>(Game::GM_PTR);
+    if (gmPtr <= 0x1000) return 0;
+    DWORD gm = Read<DWORD>(gmPtr + Game::GM_OFFSET);
+    if (gm <= 0x1000) return 0;
+    return Read<DWORD>(gm + Game::CURSOR_OFFSET);
+}
+
+bool WriteCursorPos(WORD tileX, WORD tileY) {
+    DWORD cur = GetCursorAddr();
+    if (cur <= 0x1000) return false;
+    if (tileX > 27) tileX = 27;
+    if (tileY > 27) tileY = 27;
+    Write<WORD>(cur + Game::CUR_X, tileX);
+    Write<WORD>(cur + Game::CUR_Y, tileY);
+    int rawX = (int)tileX * 0x180000;
+    int rawY = (int)tileY * 0x180000;
+    Write<int>(cur + Game::CUR_RAW_X, rawX);
+    Write<int>(cur + Game::CUR_RAW_Y, rawY);
+    return true;
+}
+
+bool MoveToTile(float gameX, float gameY) {
+    WORD tileX = (WORD)((int)(gameX / 24.0f));
+    WORD tileY = (WORD)((int)(gameY / 24.0f));
+    if (tileX > 27) tileX = 27;
+    if (tileY > 27) tileY = 27;
+    if (!WriteCursorPos(tileX, tileY)) return false;
+    Sleep(30);
+    keybd_event(VK_RETURN, 0, 0, 0);
+    Sleep(30);
+    keybd_event(VK_RETURN, 0, KEYEVENTF_KEYUP, 0);
+    return true;
+}
+
+bool GameToClient(float gx, float gy, int& cx, int& cy) {
+    HWND w = FindGameWindow();
+    if (!w) return false;
+    RECT rc; GetClientRect(w, &rc);
+    int midX = (rc.right - rc.left) / 2;
+    int midY = (rc.bottom - rc.top) / 2;
+    float dx = gx - g_selfX;
+    float dy = gy - g_selfY;
+    float len = sqrtf(dx*dx + dy*dy);
+    if (len < 0.5f) { cx = midX; cy = midY; return true; }
+    cx = midX + (int)(dx * g_scale);
+    cy = midY + (int)(dy * g_scale);
+    if (cx < 5) cx = 5; if (cx > rc.right - 5) cx = rc.right - 5;
+    if (cy < 5) cy = 5; if (cy > rc.bottom - 5) cy = rc.bottom - 5;
+    return true;
+}
+
+// ============================================================
 // Entity tree traversal
 // ============================================================
 void TraverseTree(DWORD node, std::vector<EntityData>& entities, std::vector<CorpseData>& corpses, float selfX, float selfY) {
@@ -219,15 +377,14 @@ void TraverseTree(DWORD node, std::vector<EntityData>& entities, std::vector<Cor
     int hp = Read<int>(objPtr + Game::ENT_HP);
 
     if (hp < 0) {
-        CorpseData c{};
-        c.objAddr = objPtr;
+        CorpseData c{}; c.objAddr = objPtr;
         DWORD namePtr = Read<DWORD>(objPtr + Game::ENT_NAME_PTR);
         int nameLen = Read<int>(objPtr + Game::ENT_NAME_LEN);
         if (nameLen > 0 && nameLen < 64 && namePtr > 0x1000) {
             wchar_t w[64] = {};
             for (int i = 0; i < nameLen; i++) { wchar_t ch = Read<wchar_t>(namePtr + i * 2); if (ch == 0) break; w[i] = ch; }
-            wcscpy_s(c.name, w);
-        } else wcscpy_s(c.name, L"Corpse");
+            wcscpy(c.name, w);
+        } else wcscpy(c.name, L"Corpse");
         c.x = Read<int>(objPtr + Game::ENT_RAW_X) / 65536.0f;
         c.y = Read<int>(objPtr + Game::ENT_RAW_Y) / 65536.0f;
         c.distance = CalcDist(selfX, selfY, c.x, c.y);
@@ -243,8 +400,8 @@ void TraverseTree(DWORD node, std::vector<EntityData>& entities, std::vector<Cor
     if (nameLen > 0 && nameLen < 64 && namePtr > 0x1000) {
         wchar_t w[64] = {};
         for (int i=0;i<nameLen;i++) { wchar_t c=Read<wchar_t>(namePtr+i*2); if(c==0) break; w[i]=c; }
-        wcscpy_s(e.name, w);
-    } else wcscpy_s(e.name, L"(unknown)");
+        wcscpy(e.name, w);
+    } else wcscpy(e.name, L"(unknown)");
     e.x = Read<int>(objPtr+Game::ENT_RAW_X) / 65536.0f;
     e.y = Read<int>(objPtr+Game::ENT_RAW_Y) / 65536.0f;
     e.hp=Read<int>(objPtr+Game::ENT_HP); e.maxHp=Read<int>(objPtr+Game::ENT_MAX_HP);
@@ -295,226 +452,6 @@ bool ReadGameState(float& sx, float& sy, int& hp, int& mhp, int& mn, int& mmn,
 }
 
 // ============================================================
-// Debug console
-// ============================================================
-static HWND g_hDebugConsole = NULL;
-static HWND g_hDebugEdit = NULL;
-static bool g_debugConsoleOpen = false;
-
-void DebugLog(const char* fmt, ...) {
-    char buf[1024];
-    va_list args; va_start(args, fmt);
-    _vsnprintf(buf, sizeof(buf), fmt, args);
-    va_end(args);
-    OutputDebugStringA(buf); OutputDebugStringA("\n");
-    if (g_hDebugEdit) {
-        int len = GetWindowTextLengthA(g_hDebugEdit);
-        SendMessageA(g_hDebugEdit, EM_SETSEL, len, len);
-        SendMessageA(g_hDebugEdit, EM_REPLACESEL, FALSE, (LPARAM)buf);
-        SendMessageA(g_hDebugEdit, EM_SETSEL, len + (int)strlen(buf), len + (int)strlen(buf));
-        SendMessageA(g_hDebugEdit, EM_SCROLLCARET, 0, 0);
-    }
-}
-
-void OpenDebugConsole(HWND parent) {
-    if (g_debugConsoleOpen) return;
-    WNDCLASSEXW wc{}; wc.cbSize=sizeof(wc);
-    wc.lpfnWndProc=DefWindowProcW; wc.hInstance=g_hInst;
-    wc.hCursor=LoadCursor(NULL,IDC_ARROW);
-    wc.hbrBackground=(HBRUSH)(COLOR_BTNFACE+1);
-    wc.lpszClassName=L"DebugConsoleWnd";
-    RegisterClassExW(&wc);
-    g_hDebugConsole = CreateWindowExW(WS_EX_TOOLWINDOW, L"DebugConsoleWnd",
-        L"Bot Debug Console", WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX,
-        parent ? 700 : CW_USEDEFAULT, parent ? 50 : CW_USEDEFAULT,
-        550, 400, parent, NULL, g_hInst, NULL);
-    g_hDebugEdit = CreateWindowExW(0, L"EDIT", L"",
-        WS_CHILD|WS_VISIBLE|WS_VSCROLL|ES_MULTILINE|ES_AUTOVSCROLL|ES_READONLY,
-        5, 5, 535, 355, g_hDebugConsole, NULL, g_hInst, NULL);
-    HFONT hMono = CreateFontW(-12, 0, 0, 0, FW_NORMAL, 0, 0, 0,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        DEFAULT_QUALITY, FIXED_PITCH|FF_MODERN, L"Consolas");
-    SendMessageW(g_hDebugEdit, WM_SETFONT, (WPARAM)hMono, TRUE);
-    ShowWindow(g_hDebugConsole, SW_SHOW);
-    UpdateWindow(g_hDebugConsole);
-    g_debugConsoleOpen = true;
-    DebugLog("=== Bot Debug Console Started ===");
-    DebugLog("PID: %d", g_gamePid);
-}
-
-// ============================================================
-// Find game window (PID-based)
-// ============================================================
-HWND FindGameWindow() {
-    if(g_gamePid) {
-        struct Ctx { DWORD pid; HWND h; } ctx={g_gamePid,NULL};
-        EnumWindows([](HWND h,LPARAM lp)->BOOL{
-            auto c=(Ctx*)lp; DWORD p=0; GetWindowThreadProcessId(h,&p);
-            if(p==c->pid&&IsWindowVisible(h)){c->h=h;return FALSE;} return TRUE;
-        },(LPARAM)&ctx);
-        return ctx.h;
-    }
-    return NULL;
-}
-
-// ============================================================
-// Game interaction helpers
-// ============================================================
-DWORD GetCursorAddr() {
-    DWORD gmPtr = Read<DWORD>(Game::GM_PTR);
-    if (gmPtr <= 0x1000) return 0;
-    DWORD gm = Read<DWORD>(gmPtr + Game::GM_OFFSET);
-    if (gm <= 0x1000) return 0;
-    return Read<DWORD>(gm + Game::CURSOR_OFFSET);
-}
-
-bool WriteCursorPos(WORD tileX, WORD tileY) {
-    DWORD cur = GetCursorAddr();
-    if (cur <= 0x1000) return false;
-    if (tileX > 27) tileX = 27;
-    if (tileY > 27) tileY = 27;
-    Write<WORD>(cur + Game::CUR_X, tileX);
-    Write<WORD>(cur + Game::CUR_Y, tileY);
-    int rawX = (int)tileX * 0x180000;
-    int rawY = (int)tileY * 0x180000;
-    Write<int>(cur + Game::CUR_RAW_X, rawX);
-    Write<int>(cur + Game::CUR_RAW_Y, rawY);
-    return true;
-}
-
-bool MoveToTile(float gameX, float gameY) {
-    WORD tileX = (WORD)((int)(gameX / 24.0f));
-    WORD tileY = (WORD)((int)(gameY / 24.0f));
-    if (tileX > 27) tileX = 27;
-    if (tileY > 27) tileY = 27;
-    if (!WriteCursorPos(tileX, tileY)) return false;
-    Sleep(30);
-    HWND gw = FindGameWindow();
-    if (!gw) return false;
-    keybd_event(VK_RETURN, 0, 0, 0);
-    Sleep(30);
-    keybd_event(VK_RETURN, 0, KEYEVENTF_KEYUP, 0);
-    return true;
-}
-
-void ClickAtClient(int cx, int cy) {
-    HWND w=FindGameWindow(); if(!w) return;
-    if(GetForegroundWindow()!=w || IsIconic(w)) return;
-    POINT pt={cx,cy}; ClientToScreen(w,&pt);
-    int sx=GetSystemMetrics(SM_CXSCREEN), sy=GetSystemMetrics(SM_CYSCREEN);
-    if(pt.x<0||pt.x>=sx||pt.y<0||pt.y>=sy) return;
-    INPUT in[3]={};
-    in[0].type=INPUT_MOUSE;
-    in[0].mi.dx=(LONG)(pt.x*65536.0/sx);
-    in[0].mi.dy=(LONG)(pt.y*65536.0/sy);
-    in[0].mi.dwFlags=MOUSEEVENTF_MOVE|MOUSEEVENTF_ABSOLUTE;
-    in[1].type=INPUT_MOUSE; in[1].mi.dwFlags=MOUSEEVENTF_LEFTDOWN;
-    in[2].type=INPUT_MOUSE; in[2].mi.dwFlags=MOUSEEVENTF_LEFTUP;
-    SendInput(3,in,sizeof(INPUT));
-}
-
-void MoveToClient(int cx, int cy) {
-    HWND w = FindGameWindow();
-    if (!w) return;
-    POINT pt = { cx, cy };
-    ClientToScreen(w, &pt);
-    int sx = GetSystemMetrics(SM_CXSCREEN);
-    int sy = GetSystemMetrics(SM_CYSCREEN);
-    INPUT in = {};
-    in.type = INPUT_MOUSE;
-    in.mi.dx = (LONG)(pt.x * 65536.0 / sx);
-    in.mi.dy = (LONG)(pt.y * 65536.0 / sy);
-    in.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
-    SendInput(1, &in, sizeof(INPUT));
-}
-
-bool GameToClient(float gx, float gy, int& cx, int& cy) {
-    HWND w = FindGameWindow();
-    if (!w) return false;
-    RECT rc; GetClientRect(w, &rc);
-    int midX = (rc.right - rc.left) / 2;
-    int midY = (rc.bottom - rc.top) / 2;
-    float dx = gx - g_selfX;
-    float dy = gy - g_selfY;
-    float len = sqrtf(dx*dx + dy*dy);
-    if (len < 0.5f) { cx = midX; cy = midY; return true; }
-    cx = midX + (int)(dx * g_scale);
-    cy = midY + (int)(dy * g_scale);
-    if (cx < 5) cx = 5; if (cx > rc.right - 5) cx = rc.right - 5;
-    if (cy < 5) cy = 5; if (cy > rc.bottom - 5) cy = rc.bottom - 5;
-    return true;
-}
-
-void SendInputKey(WORD vk) {
-    INPUT in[2]={};
-    in[0].type=INPUT_KEYBOARD; in[0].ki.wVk=vk;
-    in[1].type=INPUT_KEYBOARD; in[1].ki.wVk=vk; in[1].ki.dwFlags=KEYEVENTF_KEYUP;
-    SendInput(2,in,sizeof(INPUT));
-}
-
-// ============================================================
-// Build GameContext from current state
-// ============================================================
-GameContext BuildContext() {
-    GameContext ctx{};
-    ctx.hProcess = g_hProcess;
-    ctx.gamePid = g_gamePid;
-    ctx.selfX = g_selfX;
-    ctx.selfY = g_selfY;
-    ctx.playerAddr = g_playerAddr;
-    ctx.gmAddr = g_gmAddr;
-    ctx.gameWindow = FindGameWindow();
-    ctx.tickCount = GetTickCount();
-
-    // Read current player stats
-    if (g_playerAddr > 0x1000) {
-        ctx.selfHp = Read<int>(g_playerAddr + Game::ENT_HP);
-        ctx.selfMaxHp = Read<int>(g_playerAddr + Game::ENT_MAX_HP);
-        ctx.selfMana = Read<int>(g_playerAddr + Game::ENT_MANA);
-        ctx.selfMaxMana = Read<int>(g_playerAddr + Game::ENT_MAX_MANA);
-        ctx.selfLevel = Read<int>(g_playerAddr + Game::ENT_LEVEL);
-        ctx.selfClassId = Read<BYTE>(g_playerAddr + Game::ENT_CLASS_IND);
-        DWORD np = Read<DWORD>(g_playerAddr + Game::ENT_NAME_PTR);
-        int nl = Read<int>(g_playerAddr + Game::ENT_NAME_LEN);
-        if (nl > 0 && nl < 64 && np > 0x1000) {
-            wchar_t w[64] = {};
-            for (int i = 0; i < nl; i++) { wchar_t c = Read<wchar_t>(np + i * 2); if (c == 0) break; w[i] = c; }
-            ctx.selfName = w;
-        }
-    }
-
-    // Convert cached entities
-    for (auto& e : g_cachedPlayers) {
-        GameContext::EntityInfo ei;
-        ei.objAddr = e.objAddr; ei.name = e.name;
-        ei.x = e.x; ei.y = e.y; ei.hp = e.hp; ei.maxHp = e.maxHp;
-        ei.distance = e.distance; ei.type = e.type;
-        ctx.players.push_back(ei);
-    }
-    for (auto& e : g_cachedMobs) {
-        GameContext::EntityInfo ei;
-        ei.objAddr = e.objAddr; ei.name = e.name;
-        ei.x = e.x; ei.y = e.y; ei.hp = e.hp; ei.maxHp = e.maxHp;
-        ei.distance = e.distance; ei.type = e.type;
-        ctx.mobs.push_back(ei);
-    }
-    for (auto& e : g_cachedNpcs) {
-        GameContext::EntityInfo ei;
-        ei.objAddr = e.objAddr; ei.name = e.name;
-        ei.x = e.x; ei.y = e.y; ei.hp = e.hp; ei.maxHp = e.maxHp;
-        ei.distance = e.distance; ei.type = e.type;
-        ctx.npcs.push_back(ei);
-    }
-    for (auto& c : g_cachedCorpses) {
-        GameContext::CorpseInfo ci;
-        ci.objAddr = c.objAddr; ci.name = c.name;
-        ci.x = c.x; ci.y = c.y; ci.distance = c.distance;
-        ctx.corpses.push_back(ci);
-    }
-    return ctx;
-}
-
-// ============================================================
 // DLL injection
 // ============================================================
 bool InjectDLL(DWORD pid, const wchar_t* path) {
@@ -537,25 +474,25 @@ bool InjectDLL(DWORD pid, const wchar_t* path) {
 // Process listing
 // ============================================================
 void RefreshProcesses(HWND hList) {
-    g_procs.clear();
-    g_listToProc.clear();
+    G->procs.clear();
+    G->listToProc.clear();
     SendMessageW(hList,LB_RESETCONTENT,0,0);
     HANDLE hs=CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0);
     if(hs==INVALID_HANDLE_VALUE) return;
     PROCESSENTRY32W pe{}; pe.dwSize=sizeof(pe);
-    if(Process32FirstW(hs,&pe)){do{g_procs.push_back({pe.th32ProcessID,pe.szExeFile});}while(Process32NextW(hs,&pe));}
+    if(Process32FirstW(hs,&pe)){do{G->procs.push_back({pe.th32ProcessID,pe.szExeFile});}while(Process32NextW(hs,&pe));}
     CloseHandle(hs);
-    std::sort(g_procs.begin(),g_procs.end(),[](const ProcInfo& a,const ProcInfo& b){return a.name<b.name;});
+    std::sort(G->procs.begin(),G->procs.end(),[](const ProcInfo& a,const ProcInfo& b){return a.name<b.name;});
 
     std::vector<size_t> wsIdx, otherIdx;
-    for(size_t i=0;i<g_procs.size();i++){
-        if(_wcsicmp(g_procs[i].name.c_str(), L"warspear.exe")==0) wsIdx.push_back(i);
+    for(size_t i=0;i<G->procs.size();i++){
+        if(_wcsicmp(G->procs[i].name.c_str(), L"warspear.exe")==0) wsIdx.push_back(i);
         else otherIdx.push_back(i);
     }
 
     for(size_t idx : wsIdx){
-        g_listToProc.push_back((int)idx);
-        auto& p = g_procs[idx];
+        G->listToProc.push_back((int)idx);
+        auto& p = G->procs[idx];
         HANDLE hp = OpenProcess(PROCESS_QUERY_INFORMATION|PROCESS_VM_READ, FALSE, p.pid);
         std::wstring charName = L"(loading...)";
         int level = 0, classId = 0;
@@ -573,238 +510,402 @@ void RefreshProcesses(HWND hList) {
         }
         wchar_t buf[256];
         if(charName != L"(loading...)" && charName != L"(not loaded)")
-            swprintf_s(buf, L"%s [Lv.%d %s]  (PID %d)", charName.c_str(), level, GetClassName(classId), p.pid);
+            swprintf(buf, 256, L"%s [Lv.%d %s]  (PID %d)", charName.c_str(), level, GetClassName(classId), p.pid);
         else
-            swprintf_s(buf, L"%s  (PID %d)", charName.c_str(), p.pid);
+            swprintf(buf, 256, L"%s  (PID %d)", charName.c_str(), p.pid);
         SendMessageW(hList, LB_ADDSTRING, 0, (LPARAM)buf);
     }
 
     if(!wsIdx.empty() && !otherIdx.empty()){
-        g_listToProc.push_back(-1);
+        G->listToProc.push_back(-1);
         SendMessageW(hList, LB_ADDSTRING, 0, (LPARAM)L"--- other processes ---");
     }
     for(size_t idx : otherIdx){
-        g_listToProc.push_back((int)idx);
-        auto& p = g_procs[idx];
-        wchar_t buf[256]; swprintf_s(buf,L"%s  (PID %d)",p.name.c_str(),p.pid);
+        G->listToProc.push_back((int)idx);
+        auto& p = G->procs[idx];
+        wchar_t buf[256];
+        swprintf(buf, 256, L"%s  (PID %d)", p.name.c_str(), p.pid);
         SendMessageW(hList,LB_ADDSTRING,0,(LPARAM)buf);
     }
 }
 
 // ============================================================
-// UI Helpers
+// Build GameContext
 // ============================================================
-HFONT g_hFont = NULL;
-void InitFont() { g_hFont=CreateFontW(-11,0,0,0,FW_NORMAL,0,0,0,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH|FF_SWISS,L"Segoe UI"); }
-void SetFont(HWND h){SendMessageW(h,WM_SETFONT,(WPARAM)g_hFont,TRUE);}
+GameContext BuildContext() {
+    GameContext ctx{};
+    ctx.hProcess = g_hProcess;
+    ctx.gamePid = g_gamePid;
+    ctx.selfX = g_selfX; ctx.selfY = g_selfY;
+    ctx.playerAddr = g_playerAddr; ctx.gmAddr = g_gmAddr;
+    ctx.gameWindow = FindGameWindow();
+    ctx.tickCount = GetTickCount();
 
-// ============================================================
-// UI Layout constants
-// ============================================================
-static const int UI_MENU_H    = 24;
-static const int UI_STATUS_H  = 22;
-static const int UI_TREE_W    = 180;
-static const int UI_DETAIL_X  = UI_TREE_W + 15;
-static const int UI_DETAIL_W  = 390;
-static const int UI_DETAIL_H  = 360;
-static const int UI_TREE_Y    = UI_MENU_H + 5;
-static const int UI_DETAIL_Y  = UI_MENU_H + 5;
-
-// ============================================================
-// Process list panel (for Connection tab)
-// ============================================================
-static HWND g_hProcList = NULL;
-static HWND g_hBtnConnect = NULL;
-static HWND g_hBtnRefresh = NULL;
-static HWND g_hDllPath = NULL;
-static HWND g_hBtnBrowse = NULL;
-static HWND g_hBtnInject = NULL;
-static HWND g_hProcPanel = NULL;
-
-void CreateProcessPanel(HWND parent) {
-    g_hProcPanel = CreateWindowExW(0, L"STATIC", L"",
-        WS_CHILD|WS_VISIBLE, UI_DETAIL_X, UI_DETAIL_Y, UI_DETAIL_W, UI_DETAIL_H,
-        parent, NULL, g_hInst, NULL);
-
-    int x = 10, y = 5;
-    CreateWindowExW(0, L"static", L"Processes:", WS_CHILD|WS_VISIBLE,
-        x, y, 200, 18, g_hProcPanel, NULL, g_hInst, NULL);
-    y += 20;
-    g_hProcList = CreateWindowExW(0, L"listbox", L"",
-        WS_CHILD|WS_VISIBLE|WS_BORDER|WS_VSCROLL|LBS_NOTIFY,
-        x, y, 370, 200, g_hProcPanel, NULL, g_hInst, NULL);
-    SetFont(g_hProcList);
-
-    y += 208;
-    g_hBtnRefresh = CreateWindowExW(0, L"button", L"Refresh",
-        WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
-        x, y, 70, 24, g_hProcPanel, (HMENU)IDM_REFRESH, g_hInst, NULL);
-    g_hBtnConnect = CreateWindowExW(0, L"button", L"Connect",
-        WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
-        x+75, y, 70, 24, g_hProcPanel, (HMENU)IDM_CONNECT, g_hInst, NULL);
-
-    y += 32;
-    CreateWindowExW(0, L"static", L"DLL:", WS_CHILD|WS_VISIBLE,
-        x, y+2, 30, 18, g_hProcPanel, NULL, g_hInst, NULL);
-    g_hDllPath = CreateWindowExW(0, L"edit", L"",
-        WS_CHILD|WS_VISIBLE|WS_BORDER|ES_AUTOHSCROLL,
-        x+32, y, 220, 22, g_hProcPanel, NULL, g_hInst, NULL);
-    g_hBtnBrowse = CreateWindowExW(0, L"button", L"...",
-        WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
-        x+255, y, 30, 22, g_hProcPanel, (HMENU)IDM_BROWSE_DLL, g_hInst, NULL);
-    g_hBtnInject = CreateWindowExW(0, L"button", L"Inject DLL",
-        WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
-        x+290, y, 70, 22, g_hProcPanel, (HMENU)IDM_INJECT, g_hInst, NULL);
-
-    SetFont(g_hBtnRefresh); SetFont(g_hBtnConnect);
-    SetFont(g_hDllPath); SetFont(g_hBtnBrowse); SetFont(g_hBtnInject);
-}
-
-// ============================================================
-// Detail panel for active module
-// ============================================================
-static HWND g_hDetailLabel = NULL;
-
-void CreateDetailPanel(HWND parent) {
-    g_hDetailPanel = CreateWindowExW(0, L"STATIC", L"",
-        WS_CHILD, UI_DETAIL_X, UI_DETAIL_Y, UI_DETAIL_W, UI_DETAIL_H,
-        parent, NULL, g_hInst, NULL);
-    g_hDetailLabel = CreateWindowExW(0, L"static", L"Select a module from the tree",
-        WS_CHILD|WS_VISIBLE, 10, 10, 370, 20,
-        g_hDetailPanel, NULL, g_hInst, NULL);
-    SetFont(g_hDetailLabel);
-}
-
-void ShowModuleUI(IModule* mod) {
-    // Hide process panel
-    if (g_hProcPanel) ShowWindow(g_hProcPanel, SW_HIDE);
-
-    // Destroy old module UI children
-    if (g_hDetailPanel) {
-        // Kill all child windows of detail panel
-        HWND child = GetWindow(g_hDetailPanel, GW_CHILD);
-        while (child) {
-            HWND next = GetWindow(child, GW_HWNDNEXT);
-            DestroyWindow(child);
-            child = next;
+    if (g_playerAddr > 0x1000) {
+        ctx.selfHp = Read<int>(g_playerAddr + Game::ENT_HP);
+        ctx.selfMaxHp = Read<int>(g_playerAddr + Game::ENT_MAX_HP);
+        ctx.selfMana = Read<int>(g_playerAddr + Game::ENT_MANA);
+        ctx.selfMaxMana = Read<int>(g_playerAddr + Game::ENT_MAX_MANA);
+        ctx.selfLevel = Read<int>(g_playerAddr + Game::ENT_LEVEL);
+        ctx.selfClassId = Read<BYTE>(g_playerAddr + Game::ENT_CLASS_IND);
+        DWORD np = Read<DWORD>(g_playerAddr + Game::ENT_NAME_PTR);
+        int nl = Read<int>(g_playerAddr + Game::ENT_NAME_LEN);
+        if (nl > 0 && nl < 64 && np > 0x1000) {
+            wchar_t w[64] = {};
+            for (int i = 0; i < nl; i++) { wchar_t c = Read<wchar_t>(np + i * 2); if (c == 0) break; w[i] = c; }
+            ctx.selfName = w;
         }
     }
 
-    g_activeModule = mod;
+    for (auto& e : G->cachedPlayers) {
+        GameContext::EntityInfo ei;
+        ei.objAddr=e.objAddr; ei.name=e.name; ei.x=e.x; ei.y=e.y;
+        ei.hp=e.hp; ei.maxHp=e.maxHp; ei.distance=e.distance; ei.type=e.type;
+        ctx.players.push_back(ei);
+    }
+    for (auto& e : G->cachedMobs) {
+        GameContext::EntityInfo ei;
+        ei.objAddr=e.objAddr; ei.name=e.name; ei.x=e.x; ei.y=e.y;
+        ei.hp=e.hp; ei.maxHp=e.maxHp; ei.distance=e.distance; ei.type=e.type;
+        ctx.mobs.push_back(ei);
+    }
+    for (auto& e : G->cachedNpcs) {
+        GameContext::EntityInfo ei;
+        ei.objAddr=e.objAddr; ei.name=e.name; ei.x=e.x; ei.y=e.y;
+        ei.hp=e.hp; ei.maxHp=e.maxHp; ei.distance=e.distance; ei.type=e.type;
+        ctx.npcs.push_back(ei);
+    }
+    for (auto& c : G->cachedCorpses) {
+        GameContext::CorpseInfo ci;
+        ci.objAddr=c.objAddr; ci.name=c.name; ci.x=c.x; ci.y=c.y; ci.distance=c.distance;
+        ctx.corpses.push_back(ci);
+    }
+    return ctx;
+}
 
-    if (!mod || !mod->HasUI()) {
-        if (g_hDetailPanel) {
-            ShowWindow(g_hDetailPanel, SW_SHOW);
-            const wchar_t* msg = mod ? mod->GetName() : L"Select a module from the tree";
-            g_hDetailLabel = CreateWindowExW(0, L"static", msg,
-                WS_CHILD|WS_VISIBLE, 10, 10, 370, 20,
-                g_hDetailPanel, NULL, g_hInst, NULL);
-            SetFont(g_hDetailLabel);
+// ============================================================
+// UI: Input dialog for int/float settings
+// ============================================================
+static int g_inputResult = 0;
+static HWND g_inputParent = NULL;
+
+LRESULT CALLBACK InputDlgProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    switch (m) {
+    case WM_CREATE: {
+        HWND hEd = CreateWindowExW(0, L"edit", L"", WS_CHILD|WS_VISIBLE|WS_BORDER|ES_AUTOHSCROLL|ES_NUMBER,
+            10, 10, 180, 24, h, (HMENU)1001, g_hInst, NULL);
+        SendMessageW(hEd, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+        wchar_t buf[32]; swprintf(buf, 32, L"%d", g_inputResult);
+        SetWindowTextW(hEd, buf);
+        SetFocus(hEd);
+        CreateWindowExW(0, L"button", L"OK", WS_CHILD|WS_VISIBLE|BS_DEFPUSHBUTTON,
+            200, 10, 50, 24, h, (HMENU)1002, g_hInst, NULL);
+        CreateWindowExW(0, L"button", L"Cancel", WS_CHILD|WS_VISIBLE,
+            260, 10, 50, 24, h, (HMENU)1003, g_hInst, NULL);
+        break;
+    }
+    case WM_COMMAND:
+        if (LOWORD(w) == 1002) {
+            wchar_t buf[32] = {};
+            GetWindowTextW(GetDlgItem(h, 1001), buf, 32);
+            g_inputResult = _wtoi(buf);
+            DestroyWindow(h);
+        }
+        if (LOWORD(w) == 1003) DestroyWindow(h);
+        break;
+    case WM_DESTROY:
+        if (g_inputParent) { EnableWindow(g_inputParent, TRUE); SetForegroundWindow(g_inputParent); }
+        break;
+    }
+    return DefWindowProcW(h, m, w, l);
+}
+
+int ShowInputInt(HWND parent, const wchar_t* title, int current) {
+    g_inputResult = current;
+    g_inputParent = parent;
+
+    WNDCLASSEXW wc{}; wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = InputDlgProc;
+    wc.hInstance = g_hInst;
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+    wc.lpszClassName = L"InputDlg";
+    RegisterClassExW(&wc);
+
+    EnableWindow(parent, FALSE);
+    HWND hDlg = CreateWindowExW(WS_EX_DLGMODALFRAME, L"InputDlg", title,
+        WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU,
+        CW_USEDEFAULT, CW_USEDEFAULT, 330, 70,
+        parent ? parent : g_hWnd, NULL, g_hInst, NULL);
+    ShowWindow(hDlg, SW_SHOW); UpdateWindow(hDlg);
+    MSG msg{};
+    while (GetMessageW(&msg, NULL, 0, 0)) {
+        if (!IsWindow(hDlg)) break;
+        if (!IsDialogMessageW(hDlg, &msg)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
+    }
+    return g_inputResult;
+}
+
+// ============================================================
+// UI: Accordion config - helpers
+// ============================================================
+void AccordionUpdateLabels(int mod);
+
+void AccordionToggleModule(int mod) {
+    g_modExpanded[mod] = !g_modExpanded[mod];
+    ShowWindow(g_hModPanel[mod], g_modExpanded[mod] ? SW_SHOW : SW_HIDE);
+    AccordionUpdateLabels(mod);
+    InvalidateRect(g_hWnd, NULL, TRUE);
+}
+
+void AccordionUpdateLabels(int mod) {
+    wchar_t b[128];
+    auto setLabel = [](HWND h, const wchar_t* t) { if(h) SetWindowTextW(h, t); };
+    switch (mod) {
+    case MID_TARGETER:
+        setLabel(g_hModLabel[0][0], G->targeter.enabled ? L"[ON] Click to toggle" : L"[OFF] Click to toggle");
+        setLabel(g_hModLabel[0][1], G->targeter.retargetOnNearby ? L"Retarget: ON" : L"Retarget: OFF");
+        swprintf(b,128,L"Max dist: %d", (int)G->targeter.maxDistance);
+        setLabel(g_hModLabel[0][2], b);
+        break;
+    case MID_ATTACKER:
+        setLabel(g_hModLabel[1][0], G->attacker.enabled ? L"[ON] Click to toggle" : L"[OFF] Click to toggle");
+        swprintf(b,128,L"Cooldown: %d ms", G->attacker.globalCooldownMs);
+        setLabel(g_hModLabel[1][1], b);
+        break;
+    case MID_HEALER:
+        setLabel(g_hModLabel[2][0], G->healer.enabled ? L"[ON] Click to toggle" : L"[OFF] Click to toggle");
+        swprintf(b,128,L"Min HP%%: %d", (int)G->healer.minHpPct);
+        setLabel(g_hModLabel[2][1], b);
+        swprintf(b,128,L"Heal key: %d", G->healer.healKeyBind - 0x30);
+        setLabel(g_hModLabel[2][2], b);
+        break;
+    case MID_PHEALER:
+        setLabel(g_hModLabel[3][0], G->partyHealer.enabled ? L"[ON] Click to toggle" : L"[OFF] Click to toggle");
+        swprintf(b,128,L"Cooldown: %d ms", G->partyHealer.cooldownMs);
+        setLabel(g_hModLabel[3][1], b);
+        break;
+    case MID_LOOTER:
+        setLabel(g_hModLabel[4][0], G->looter.enabled ? L"[ON] Click to toggle" : L"[OFF] Click to toggle");
+        swprintf(b,128,L"Radius: %d", (int)G->looter.radius);
+        setLabel(g_hModLabel[4][1], b);
+        break;
+    case MID_FOLLOWER:
+        setLabel(g_hModLabel[5][0], G->follower.enabled ? L"[ON] Click to toggle" : L"[OFF] Click to toggle");
+        break;
+    case MID_EXTRA:
+        setLabel(g_hModLabel[6][0], G->extra.antiAfk ? L"Anti AFK: ON" : L"Anti AFK: OFF");
+        setLabel(g_hModLabel[6][1], G->extra.autoRevive ? L"Auto Revive: ON" : L"Auto Revive: OFF");
+        setLabel(g_hModLabel[6][2], G->extra.autoSell ? L"Auto Sell: ON" : L"Auto Sell: OFF");
+        setLabel(g_hModLabel[6][3], G->extra.autoRepair ? L"Auto Repair: ON" : L"Auto Repair: OFF");
+        break;
+    }
+    wchar_t hdr[64];
+    swprintf(hdr,64,L"%s %s", MOD_NAMES[mod], g_modExpanded[mod] ? L"-" : L"+");
+    SetWindowTextW(g_hModHeader[mod], hdr);
+}
+
+// ============================================================
+// UI: Accordion config - handle clicks
+// ============================================================
+void AccordionHandleClick(int id) {
+    if (id >= IDM_MOD_HEADER && id < IDM_MOD_HEADER + 7) {
+        AccordionToggleModule(id - IDM_MOD_HEADER);
+        return;
+    }
+    int mod = (id - IDM_MOD_TOGGLE) / 10;
+    int sub = (id - IDM_MOD_TOGGLE) % 10;
+    if (id >= IDM_MOD_TOGGLE && id < IDM_MOD_TOGGLE + 70) {
+        switch (mod) {
+        case MID_TARGETER:
+            if (sub == 0) { G->targeter.enabled = !G->targeter.enabled; AccordionUpdateLabels(mod); }
+            else if (sub == 1) { G->targeter.retargetOnNearby = !G->targeter.retargetOnNearby; AccordionUpdateLabels(mod); }
+            else if (sub == 2) { int v = ShowInputInt(g_hWnd, L"Max Distance", (int)G->targeter.maxDistance); G->targeter.maxDistance = (float)v; AccordionUpdateLabels(mod); }
+            break;
+        case MID_ATTACKER:
+            if (sub == 0) { G->attacker.enabled = !G->attacker.enabled; AccordionUpdateLabels(mod); }
+            else if (sub == 1) { int v = ShowInputInt(g_hWnd, L"Cooldown (ms)", G->attacker.globalCooldownMs); G->attacker.globalCooldownMs = v; AccordionUpdateLabels(mod); }
+            break;
+        case MID_HEALER:
+            if (sub == 0) { G->healer.enabled = !G->healer.enabled; AccordionUpdateLabels(mod); }
+            else if (sub == 1) { int v = ShowInputInt(g_hWnd, L"Min HP%", (int)G->healer.minHpPct); G->healer.minHpPct = (float)v; AccordionUpdateLabels(mod); }
+            else if (sub == 2) { int v = ShowInputInt(g_hWnd, L"Heal Key (1-9)", G->healer.healKeyBind - 0x30); if(v>=1&&v<=9) G->healer.healKeyBind = 0x30+v; AccordionUpdateLabels(mod); }
+            break;
+        case MID_PHEALER:
+            if (sub == 0) { G->partyHealer.enabled = !G->partyHealer.enabled; AccordionUpdateLabels(mod); }
+            else if (sub == 1) { int v = ShowInputInt(g_hWnd, L"Cooldown (ms)", G->partyHealer.cooldownMs); G->partyHealer.cooldownMs = v; AccordionUpdateLabels(mod); }
+            break;
+        case MID_LOOTER:
+            if (sub == 0) { G->looter.enabled = !G->looter.enabled; AccordionUpdateLabels(mod); }
+            else if (sub == 1) { int v = ShowInputInt(g_hWnd, L"Loot Radius", (int)G->looter.radius); G->looter.radius = (float)v; AccordionUpdateLabels(mod); }
+            break;
+        case MID_FOLLOWER:
+            if (sub == 0) { G->follower.enabled = !G->follower.enabled; AccordionUpdateLabels(mod); }
+            break;
+        case MID_EXTRA:
+            if (sub == 0) { G->extra.antiAfk = !G->extra.antiAfk; AccordionUpdateLabels(mod); }
+            else if (sub == 1) { G->extra.autoRevive = !G->extra.autoRevive; AccordionUpdateLabels(mod); }
+            else if (sub == 2) { G->extra.autoSell = !G->extra.autoSell; AccordionUpdateLabels(mod); }
+            else if (sub == 3) { G->extra.autoRepair = !G->extra.autoRepair; AccordionUpdateLabels(mod); }
+            break;
         }
         return;
     }
-
-    ShowWindow(g_hDetailPanel, SW_SHOW);
-    mod->CreateUI(g_hDetailPanel, 10, 30, 370);
 }
 
-void ShowProcessPanel() {
-    if (g_hDetailPanel) ShowWindow(g_hDetailPanel, SW_HIDE);
-    if (g_hProcPanel) {
-        ShowWindow(g_hProcPanel, SW_SHOW);
-        RefreshProcesses(g_hProcList);
+// ============================================================
+// UI: Panel subclass to forward WM_COMMAND to main window
+// ============================================================
+LRESULT CALLBACK PanelWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    if (g_hWnd) {
+        if (m == WM_COMMAND) return SendMessageW(g_hWnd, WM_COMMAND, w, l);
+        if (m == WM_NOTIFY)  return SendMessageW(g_hWnd, WM_NOTIFY, w, l);
+        if (m == WM_CTLCOLORSTATIC) return SendMessageW(g_hWnd, WM_CTLCOLORSTATIC, w, l);
+        if (m == WM_CTLCOLORLISTBOX) return SendMessageW(g_hWnd, WM_CTLCOLORLISTBOX, w, l);
+        if (m == WM_HSCROLL || m == WM_VSCROLL) return SendMessageW(g_hWnd, m, w, l);
     }
-    g_activeModule = nullptr;
+    return DefWindowProcW(h, m, w, l);
+}
+
+static const wchar_t* PANEL_CLASS = L"WsBotPanel";
+
+void RegisterPanelClass() {
+    WNDCLASSEXW wc{}; wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = PanelWndProc;
+    wc.hInstance = g_hInst;
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+    wc.lpszClassName = PANEL_CLASS;
+    RegisterClassExW(&wc);
 }
 
 // ============================================================
-// Menu bar
+// UI: Tab switching
 // ============================================================
-void CreateMenuBar(HWND hWnd) {
-    HMENU hMenuBar = CreateMenu();
-    HMENU hConfigMenu = CreatePopupMenu();
-    HMENU hQuickMenu = CreatePopupMenu();
-    HMENU hConnMenu = CreatePopupMenu();
-
-    AppendMenuW(hMenuBar, MF_POPUP, (UINT_PTR)hConfigMenu, L"Config");
-    AppendMenuW(hConfigMenu, MF_STRING, IDM_REFRESH, L"Refresh Processes");
-    AppendMenuW(hConfigMenu, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(hConfigMenu, MF_STRING, IDM_EXIT, L"Exit");
-
-    AppendMenuW(hMenuBar, MF_POPUP, (UINT_PTR)hQuickMenu, L"Quick Actions");
-    AppendMenuW(hQuickMenu, MF_STRING, IDM_TOGGLE_ATTACK, L"Toggle Attack [F1]");
-    AppendMenuW(hQuickMenu, MF_STRING, IDM_TOGGLE_HEAL, L"Toggle Heal [F2]");
-    AppendMenuW(hQuickMenu, MF_STRING, IDM_TOGGLE_FOLLOW, L"Toggle Follow [F3]");
-    AppendMenuW(hQuickMenu, MF_STRING, IDM_TOGGLE_LOOT, L"Toggle Loot [F4]");
-    AppendMenuW(hQuickMenu, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(hQuickMenu, MF_STRING, IDM_TOGGLE_ALL, L"Toggle All ON");
-    AppendMenuW(hQuickMenu, MF_STRING, IDM_STOP_ALL, L"STOP ALL");
-    AppendMenuW(hQuickMenu, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(hQuickMenu, MF_STRING, IDM_SCALE_UP, L"Scale Up [F5]");
-    AppendMenuW(hQuickMenu, MF_STRING, IDM_SCALE_DOWN, L"Scale Down [F6]");
-
-    AppendMenuW(hMenuBar, MF_POPUP, (UINT_PTR)hConnMenu, L"Connection");
-    AppendMenuW(hConnMenu, MF_STRING, IDM_CONNECT, L"Connect to Process");
-    AppendMenuW(hConnMenu, MF_STRING, IDM_INJECT, L"Inject DLL");
-    AppendMenuW(hConnMenu, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(hConnMenu, MF_STRING, IDM_DEBUG, L"Debug Console");
-
-    SetMenu(hWnd, hMenuBar);
-    g_hMenu = hMenuBar;
+void SwitchTab(TabID tab) {
+    g_currentTab = tab;
+    for (int i = 0; i < 3; i++)
+        ShowWindow(g_hTabPanel[i], i == (int)tab ? SW_SHOW : SW_HIDE);
+    InvalidateRect(g_hWnd, NULL, TRUE);
 }
 
 // ============================================================
-// TreeView for module selection
+// UI: Create tab bar (Config | Quick actions | Connection)
 // ============================================================
-void CreateModuleTree(HWND parent) {
-    g_hTreeView = CreateWindowExW(WS_EX_CLIENTEDGE, WC_TABCONTROLW, L"",
-        WS_CHILD|WS_VISIBLE|TVS_HASLINES|TVS_HASBUTTONS|TVS_LINESATROOT|TVS_SHOWSELALWAYS,
-        5, UI_TREE_Y, UI_TREE_W, UI_DETAIL_H,
-        parent, NULL, g_hInst, NULL);
-
-    // Actually use a TreeView control
-    g_hTreeView = CreateWindowExW(WS_EX_CLIENTEDGE, WC_TREEVIEWW, L"",
-        WS_CHILD|WS_VISIBLE|TVS_HASLINES|TVS_HASBUTTONS|TVS_LINESATROOT|TVS_SHOWSELALWAYS,
-        5, UI_TREE_Y, UI_TREE_W, UI_DETAIL_H,
-        parent, (HMENU)2000, g_hInst, NULL);
-
-    SetFont(g_hTreeView);
-
-    // Register modules
-    g_modMgr.Add(&g_targeter);
-    g_modMgr.Add(&g_attacker);
-    g_modMgr.Add(&g_healer);
-    g_modMgr.Add(&g_partyHealer);
-    g_modMgr.Add(&g_looter);
-    g_modMgr.Add(&g_follower);
-    g_modMgr.Add(&g_extra);
-
-    // Load configs
-    wchar_t cfgDir[MAX_PATH];
-    GetModuleFileNameW(NULL, cfgDir, MAX_PATH);
-    wchar_t* bs = wcsrchr(cfgDir, L'\\'); if (bs) *bs = 0;
-    wcscat_s(cfgDir, L"\\config");
-    g_modMgr.LoadAll(cfgDir);
-
-    // Build tree
-    g_modMgr.BuildTreeView(g_hTreeView);
-
-    // Add connection item
-    TVINSERTSTRUCTW tis{};
-    tis.hParent = TVI_ROOT;
-    tis.hInsertAfter = TVI_FIRST;
-    tis.item.mask = TVIF_TEXT | TVIF_PARAM;
-    tis.item.pszText = L"Connection";
-    tis.item.lParam = -1; // sentinel for connection
-    TreeView_InsertItem(g_hTreeView, &tis);
+void CreateTabBar(HWND parent) {
+    int bw = 100, bh = 22, y = 2;
+    const wchar_t* labels[] = { L"Config", L"Quick actions", L"Connection" };
+    for (int i = 0; i < 3; i++) {
+        g_hTabBtn[i] = CreateWindowExW(0, L"STATIC", labels[i],
+            WS_CHILD|WS_VISIBLE|SS_CENTER|SS_NOTIFY,
+            4 + i * bw, y, bw, bh, parent, (HMENU)(2100 + i), g_hInst, NULL);
+        SetFont(g_hTabBtn[i]);
+    }
 }
 
 // ============================================================
-// Update UI
+// UI: Create Config tab (TreeView)
+// ============================================================
+void CreateConfigPanel(HWND parent) {
+    g_hTabPanel[TAB_CONFIG] = CreateWindowExW(0, PANEL_CLASS, L"",
+        WS_CHILD|WS_VSCROLL, 0, 26, 350, 544, parent, NULL, g_hInst, NULL);
+
+    int bw = 330, bh = 22, y = 2;
+    for (int m = 0; m < 7; m++) {
+        g_hModHeader[m] = CreateWindowExW(0, L"BUTTON", L"",
+            WS_CHILD|WS_VISIBLE|BS_LEFT|BS_FLAT,
+            4, y, bw, bh, g_hTabPanel[TAB_CONFIG], (HMENU)(IDM_MOD_HEADER + m), g_hInst, NULL);
+        SetFont(g_hModHeader[m]);
+        y += bh + 2;
+
+        g_hModPanel[m] = CreateWindowExW(0, PANEL_CLASS, L"",
+            WS_CHILD, 4, y, bw, 90, g_hTabPanel[TAB_CONFIG], NULL, g_hInst, NULL);
+
+        int sy = 2;
+        for (int s = 0; s < 4; s++) {
+            g_hModLabel[m][s] = CreateWindowExW(0, L"STATIC", L"",
+                WS_CHILD|WS_VISIBLE|SS_LEFT|SS_NOTIFY,
+                4, sy, bw - 8, 18, g_hModPanel[m], (HMENU)(IDM_MOD_TOGGLE + m * 10 + s), g_hInst, NULL);
+            SetFont(g_hModLabel[m][s]);
+            sy += 20;
+        }
+        y += 88;
+    }
+}
+
+void RefreshAccordion() {
+    for (int m = 0; m < 7; m++) {
+        AccordionUpdateLabels(m);
+        ShowWindow(g_hModPanel[m], g_modExpanded[m] ? SW_SHOW : SW_HIDE);
+    }
+}
+
+// ============================================================
+// UI: Create Quick Actions tab
+// ============================================================
+void CreateQuickPanel(HWND parent) {
+    g_hTabPanel[TAB_QUICK] = CreateWindowExW(0, PANEL_CLASS, L"",
+        WS_CHILD, 0, 26, 340, 370, parent, NULL, g_hInst, NULL);
+
+    int bw = 150, bh = 26, x = 10, y = 10;
+    int quickCmds[] = { IDM_TOGGLE_ATTACK, IDM_TOGGLE_HEAL, IDM_TOGGLE_FOLLOW,
+        IDM_TOGGLE_LOOT, IDM_TOGGLE_ALL, IDM_STOP_ALL, IDM_SCALE_UP, IDM_SCALE_DOWN };
+    for (int i = 0; i < 8; i++) {
+        g_hQuickBtn[i] = CreateWindowExW(0, L"button", QUICK_LABELS[i],
+            WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
+            x, y, bw, bh, g_hTabPanel[TAB_QUICK], (HMENU)quickCmds[i], g_hInst, NULL);
+        SetFont(g_hQuickBtn[i]);
+        y += 32;
+    }
+}
+
+// ============================================================
+// UI: Create Connection tab
+// ============================================================
+void CreateConnPanel(HWND parent) {
+    g_hTabPanel[TAB_CONN] = CreateWindowExW(0, PANEL_CLASS, L"",
+        WS_CHILD, 0, 26, 340, 370, parent, NULL, g_hInst, NULL);
+
+    int x = 8, y = 5;
+    HWND hLbl = CreateWindowExW(0, L"static", L"Processes:", WS_CHILD|WS_VISIBLE,
+        x, y, 200, 18, g_hTabPanel[TAB_CONN], NULL, g_hInst, NULL);
+    SetFont(hLbl); y += 20;
+
+    g_hProcList = CreateWindowExW(0, L"listbox", L"",
+        WS_CHILD|WS_VISIBLE|WS_BORDER|WS_VSCROLL|LBS_NOTIFY,
+        x, y, 320, 160, g_hTabPanel[TAB_CONN], NULL, g_hInst, NULL);
+    SetFont(g_hProcList); y += 166;
+
+    g_hBtnRefresh = CreateWindowExW(0, L"button", L"Refresh",
+        WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
+        x, y, 70, 24, g_hTabPanel[TAB_CONN], (HMENU)IDM_REFRESH, g_hInst, NULL);
+    g_hBtnConnect = CreateWindowExW(0, L"button", L"Connect",
+        WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
+        x + 75, y, 70, 24, g_hTabPanel[TAB_CONN], (HMENU)IDM_CONNECT, g_hInst, NULL);
+    SetFont(g_hBtnRefresh); SetFont(g_hBtnConnect); y += 30;
+
+    HWND hDllLbl = CreateWindowExW(0, L"static", L"DLL:", WS_CHILD|WS_VISIBLE,
+        x, y + 2, 30, 18, g_hTabPanel[TAB_CONN], NULL, g_hInst, NULL);
+    SetFont(hDllLbl);
+    g_hDllPath = CreateWindowExW(0, L"edit", L"",
+        WS_CHILD|WS_VISIBLE|WS_BORDER|ES_AUTOHSCROLL,
+        x + 32, y, 210, 22, g_hTabPanel[TAB_CONN], NULL, g_hInst, NULL);
+    SetFont(g_hDllPath);
+    g_hBtnBrowse = CreateWindowExW(0, L"button", L"...",
+        WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
+        x + 245, y, 30, 22, g_hTabPanel[TAB_CONN], (HMENU)IDM_BROWSE_DLL, g_hInst, NULL);
+    g_hBtnInject = CreateWindowExW(0, L"button", L"Inject",
+        WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
+        x + 280, y, 48, 22, g_hTabPanel[TAB_CONN], (HMENU)IDM_INJECT, g_hInst, NULL);
+    SetFont(g_hBtnBrowse); SetFont(g_hBtnInject);
+}
+
+// ============================================================
+// UI: Update UI (called on timer)
 // ============================================================
 void UpdateUI() {
     if (!g_connected || !g_hProcess) {
-        SetWindowTextW(g_hStatus, g_hProcess ? L"  Connected" : L"  Select Warspear and connect");
+        SetWindowTextW(g_hStatus, g_hProcess ? L"Connected" : L"Select Warspear and connect");
         return;
     }
     float sx,sy; int hp,mhp,mn,mmn; std::wstring name; int level=0, classId=0;
@@ -812,45 +913,32 @@ void UpdateUI() {
     std::vector<CorpseData> corpses;
     DWORD playerAddr=0, gmAddr=0;
     if (!ReadGameState(sx,sy,hp,mhp,mn,mmn,name,level,classId,pl,mb,np,corpses,&playerAddr,&gmAddr)) {
-        SetWindowTextW(g_hStatus, L"  Cannot read game memory");
+        SetWindowTextW(g_hStatus, L"Cannot read game memory");
         g_connected = false;
         return;
     }
     g_selfX = sx; g_selfY = sy;
-    g_cachedCorpses = corpses;
-    g_cachedPlayers = pl;
-    g_cachedMobs = mb;
-    g_cachedNpcs = np;
-    g_playerAddr = playerAddr;
-    g_gmAddr = gmAddr;
+    G->cachedCorpses = corpses;
+    G->cachedPlayers = pl; G->cachedMobs = mb; G->cachedNpcs = np;
+    g_playerAddr = playerAddr; g_gmAddr = gmAddr;
 
     wchar_t buf[512];
-    swprintf_s(buf, L"  %s | Lv.%d %s | HP: %d/%d | Players: %d Mobs: %d NPCs: %d",
+    swprintf(buf, 512, L"%s | Lv.%d %s | HP: %d/%d | P:%d M:%d N:%d",
         name.c_str(), level, GetClassName(classId), hp, mhp, (int)pl.size(), (int)mb.size(), (int)np.size());
     SetWindowTextW(g_hStatus, buf);
 
-    // Update window title
     static std::wstring lastCharName;
     if (name != lastCharName) {
         wchar_t wtitle[128];
-        swprintf_s(wtitle, L"WS-Bot - %s [Lv.%d %s]", name.c_str(), level, GetClassName(classId));
+        swprintf(wtitle, 128, L"%s [Lv.%d %s]", name.c_str(), level, GetClassName(classId));
         SetWindowTextW(g_hWnd, wtitle);
         lastCharName = name;
     }
 
-    // Tick all modules
     GameContext ctx = BuildContext();
-    // Sync Targeter selection to Attacker target
-    if (g_targeter.enabled && g_targeter.selectedAddr > 0x1000) {
-        g_attacker.targetAddr = g_targeter.selectedAddr;
-    }
-    g_modMgr.TickAll(ctx);
-
-    // Refresh tree labels
-    g_modMgr.RefreshTreeViewLabels(g_hTreeView);
-
-    // Update active module UI
-    if (g_activeModule) g_activeModule->UpdateUI();
+    if (G->targeter.enabled && G->targeter.selectedAddr > 0x1000)
+        G->attacker.targetAddr = G->targeter.selectedAddr;
+    G->modMgr.TickAll(ctx);
 }
 
 // ============================================================
@@ -860,49 +948,109 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_CREATE: {
         InitFont();
-        CreateMenuBar(hWnd);
+        CreateTabBar(hWnd);
+        CreateConfigPanel(hWnd);
+        CreateQuickPanel(hWnd);
+        CreateConnPanel(hWnd);
+
         g_hStatus = CreateWindowExW(0, STATUSCLASSNAMEW, L"",
             WS_CHILD|WS_VISIBLE|SBARS_SIZEGRIP, 0, 0, 0, 0, hWnd, NULL, g_hInst, NULL);
         SendMessageW(g_hStatus, WM_SETFONT, (WPARAM)g_hFont, TRUE);
-        CreateModuleTree(hWnd);
-        CreateDetailPanel(hWnd);
-        CreateProcessPanel(hWnd);
-        ShowProcessPanel();
-        break;
-    }
 
-    case WM_NOTIFY: {
-        NMHDR* nm = (NMHDR*)lParam;
-        if (nm->hwndFrom == g_hTreeView && nm->code == TVN_SELCHANGEDW) {
-            NMTREEVIEWW* nmtv = (NMTREEVIEWW*)lParam;
-            HTREEITEM sel = TreeView_GetSelection(g_hTreeView);
-            if (!sel) break;
-            TVITEMW tvi{};
-            tvi.mask = TVIF_PARAM;
-            tvi.hItem = sel;
-            TreeView_GetItem(g_hTreeView, &tvi);
+        G->modMgr.Add(&G->targeter);
+        G->modMgr.Add(&G->attacker);
+        G->modMgr.Add(&G->healer);
+        G->modMgr.Add(&G->partyHealer);
+        G->modMgr.Add(&G->looter);
+        G->modMgr.Add(&G->follower);
+        G->modMgr.Add(&G->extra);
 
-            if (tvi.lParam == -1) {
-                ShowProcessPanel();
-            } else {
-                IModule* mod = (IModule*)tvi.lParam;
-                ShowModuleUI(mod);
-            }
-        }
+        wchar_t cfgDir[MAX_PATH];
+        GetModuleFileNameW(NULL, cfgDir, MAX_PATH);
+        wchar_t* bs = wcsrchr(cfgDir, L'\\'); if (bs) *bs = 0;
+        wcscat(cfgDir, L"\\config");
+        G->modMgr.LoadAll(cfgDir);
+
+        RefreshAccordion();
+        SwitchTab(TAB_CONFIG);
+        RefreshProcesses(g_hProcList);
         break;
     }
 
     case WM_COMMAND: {
         int id = LOWORD(wParam);
-        int code = HIWORD(wParam);
 
-        // Forward to active module
-        if (g_activeModule && id >= 9000) {
-            g_activeModule->OnCommand(id, code);
+        // Accordion module headers and settings
+        if ((id >= IDM_MOD_HEADER && id < IDM_MOD_HEADER + 7) ||
+            (id >= IDM_MOD_TOGGLE && id < IDM_MOD_TOGGLE + 70)) {
+            AccordionHandleClick(id);
             break;
         }
 
+        // Tab buttons
+        if (id >= 2100 && id <= 2102) {
+            SwitchTab((TabID)(id - 2100));
+            break;
+        }
+
+        // Tab panel buttons (Forward to parent for tab buttons)
         switch (id) {
+        case IDM_TOGGLE_ATTACK:
+            G->targeter.enabled = !G->targeter.enabled;
+            G->attacker.enabled = G->targeter.enabled;
+            { wchar_t s[64]; swprintf(s,64,L"Attack: %s", G->attacker.enabled ? L"ON" : L"OFF");
+            SetWindowTextW(g_hStatus, s); }
+            break;
+
+        case IDM_TOGGLE_HEAL:
+            G->healer.enabled = !G->healer.enabled;
+            { wchar_t s[64]; swprintf(s,64,L"Heal: %s", G->healer.enabled ? L"ON" : L"OFF");
+            SetWindowTextW(g_hStatus, s); }
+            break;
+
+        case IDM_TOGGLE_FOLLOW:
+            G->follower.enabled = !G->follower.enabled;
+            { wchar_t s[64]; swprintf(s,64,L"Follow: %s", G->follower.enabled ? L"ON" : L"OFF");
+            SetWindowTextW(g_hStatus, s); }
+            break;
+
+        case IDM_TOGGLE_LOOT:
+            G->looter.enabled = !G->looter.enabled;
+            { wchar_t s[64]; swprintf(s,64,L"Loot: %s", G->looter.enabled ? L"ON" : L"OFF");
+            SetWindowTextW(g_hStatus, s); }
+            break;
+
+        case IDM_TOGGLE_ALL: {
+            bool on = !(G->targeter.enabled && G->attacker.enabled && G->healer.enabled && G->looter.enabled);
+            G->targeter.enabled = on; G->attacker.enabled = on;
+            G->healer.enabled = on; G->looter.enabled = on; G->follower.enabled = on;
+            SetWindowTextW(g_hStatus, on ? L"ALL ON" : L"ALL OFF");
+            break;
+        }
+
+        case IDM_STOP_ALL:
+            G->targeter.enabled = false; G->attacker.enabled = false;
+            G->healer.enabled = false; G->partyHealer.enabled = false;
+            G->looter.enabled = false; G->follower.enabled = false;
+            G->extra.enabled = false;
+            G->attacker.targetAddr = 0; G->follower.targetAddr = 0;
+            SetWindowTextW(g_hStatus, L"ALL STOPPED");
+            DebugLog("[STOP] All modules stopped");
+            break;
+
+        case IDM_SCALE_UP:
+            g_scale += 0.5f;
+            { wchar_t s[64]; swprintf(s,64,L"Scale: %.2f", g_scale);
+            SetWindowTextW(g_hStatus, s); }
+            break;
+
+        case IDM_SCALE_DOWN:
+            g_scale -= 0.5f;
+            if (g_scale < 0.5f) g_scale = 0.5f;
+            { wchar_t s[64]; swprintf(s,64,L"Scale: %.2f", g_scale);
+            SetWindowTextW(g_hStatus, s); }
+            break;
+
         case IDM_REFRESH:
             if (g_hProcList) RefreshProcesses(g_hProcList);
             break;
@@ -910,13 +1058,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case IDM_CONNECT: {
             if (!g_hProcList) break;
             int sel = (int)SendMessageW(g_hProcList, LB_GETCURSEL, 0, 0);
-            if (sel == LB_ERR || sel >= (int)g_listToProc.size()) {
+            if (sel == LB_ERR || sel >= (int)G->listToProc.size()) {
                 MessageBoxW(hWnd, L"Select a process first!", L"", MB_OK|MB_ICONWARNING);
                 break;
             }
-            int procIdx = g_listToProc[sel];
-            if (procIdx < 0 || procIdx >= (int)g_procs.size()) break;
-            DWORD pid = g_procs[procIdx].pid;
+            int procIdx = G->listToProc[sel];
+            if (procIdx < 0 || procIdx >= (int)G->procs.size()) break;
+            DWORD pid = G->procs[procIdx].pid;
             if (g_hProcess) CloseHandle(g_hProcess);
             g_hProcess = OpenProcess(PROCESS_QUERY_INFORMATION|PROCESS_VM_READ|PROCESS_VM_WRITE|PROCESS_VM_OPERATION, FALSE, pid);
             g_gamePid = pid;
@@ -930,20 +1078,12 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 g_connected = true;
                 OpenDebugConsole(hWnd);
                 wchar_t wtitle[128];
-                swprintf_s(wtitle, L"WS-Bot - %s [Lv.%d %s]", name.c_str(), level, GetClassName(classId));
+                swprintf(wtitle,128,L"%s [Lv.%d %s]", name.c_str(), level, GetClassName(classId));
                 SetWindowTextW(hWnd, wtitle);
                 DebugLog("[CONNECT] SUCCESS - %S Lv.%d", name.c_str(), level);
-                // Start enabled modules
-                g_modMgr.StartAll();
-                // Auto-select first mob for attacker
-                if (!m.empty()) {
-                    g_attacker.targetAddr = m[0].objAddr;
-                }
-                // Auto-select first player for follower
-                if (!p.empty()) {
-                    g_follower.targetAddr = p[0].objAddr;
-                    g_follower.targetName = p[0].name;
-                }
+                G->modMgr.StartAll();
+                if (!m.empty()) G->attacker.targetAddr = m[0].objAddr;
+                if (!p.empty()) { G->follower.targetAddr = p[0].objAddr; G->follower.targetName = p[0].name; }
             } else {
                 MessageBoxW(hWnd, L"Cannot read game memory.", L"Warning", MB_OK|MB_ICONWARNING);
             }
@@ -965,11 +1105,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 MessageBoxW(hWnd, L"Connect first!", L"", MB_OK|MB_ICONWARNING);
                 break;
             }
-            if (!g_hSharedMem) {
-                g_hSharedMem = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, sizeof(BotCmd), L"Local\\WarspearBotShared");
-                if (g_hSharedMem) g_pBotCmd = (BotCmd*)MapViewOfFile(g_hSharedMem, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(BotCmd));
+            if (!G->hSharedMem) {
+                G->hSharedMem = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, sizeof(BotCmd), L"Local\\WarspearBotShared");
+                if (G->hSharedMem) G->pBotCmd = (BotCmd*)MapViewOfFile(G->hSharedMem, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(BotCmd));
             }
-            if (!g_pBotCmd) {
+            if (!G->pBotCmd) {
                 MessageBoxW(hWnd, L"Cannot create shared memory.", L"Error", MB_OK|MB_ICONERROR);
                 break;
             }
@@ -980,9 +1120,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             if (!wcschr(dll, L':')) {
                 wchar_t dir[MAX_PATH]; GetModuleFileNameW(NULL, dir, MAX_PATH);
-                wchar_t* bs = wcsrchr(dir, L'\\'); if (bs) *bs = 0;
-                wchar_t full[MAX_PATH]; swprintf_s(full, L"%s\\%s", dir, dll);
-                wcscpy_s(dll, full);
+                wchar_t* b = wcsrchr(dir, L'\\'); if (b) *b = 0;
+                wchar_t full[MAX_PATH]; swprintf(full,MAX_PATH,L"%s\\%s", dir, dll);
+                wcscpy(dll, full);
             }
             if (InjectDLL(g_gamePid, dll)) {
                 g_dllInjected = true;
@@ -993,79 +1133,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             break;
         }
 
-        case IDM_TOGGLE_ATTACK: {
-            g_targeter.enabled = !g_targeter.enabled;
-            g_attacker.enabled = g_targeter.enabled;
-            wchar_t s[64]; swprintf_s(s, L"  Attack: %s", g_attacker.enabled ? L"ON" : L"OFF");
-            SetWindowTextW(g_hStatus, s);
-            break;
-        }
-
-        case IDM_TOGGLE_HEAL:
-            g_healer.enabled = !g_healer.enabled;
-            { wchar_t s[64]; swprintf_s(s, L"  Heal: %s", g_healer.enabled ? L"ON" : L"OFF");
-            SetWindowTextW(g_hStatus, s); }
-            break;
-
-        case IDM_TOGGLE_FOLLOW:
-            g_follower.enabled = !g_follower.enabled;
-            { wchar_t s[64]; swprintf_s(s, L"  Follow: %s", g_follower.enabled ? L"ON" : L"OFF");
-            SetWindowTextW(g_hStatus, s); }
-            break;
-
-        case IDM_TOGGLE_LOOT:
-            g_looter.enabled = !g_looter.enabled;
-            { wchar_t s[64]; swprintf_s(s, L"  Loot: %s", g_looter.enabled ? L"ON" : L"OFF");
-            SetWindowTextW(g_hStatus, s); }
-            break;
-
-        case IDM_TOGGLE_ALL: {
-            bool on = !(g_targeter.enabled && g_attacker.enabled && g_healer.enabled && g_looter.enabled);
-            g_targeter.enabled = on;
-            g_attacker.enabled = on;
-            g_healer.enabled = on;
-            g_looter.enabled = on;
-            g_follower.enabled = on;
-            g_modMgr.RefreshTreeViewLabels(g_hTreeView);
-            SetWindowTextW(g_hStatus, on ? L"  ALL ON" : L"  ALL OFF");
-            break;
-        }
-
-        case IDM_STOP_ALL: {
-            g_targeter.enabled = false;
-            g_attacker.enabled = false;
-            g_healer.enabled = false;
-            g_partyHealer.enabled = false;
-            g_looter.enabled = false;
-            g_follower.enabled = false;
-            g_extra.enabled = false;
-            g_attacker.targetAddr = 0;
-            g_follower.targetAddr = 0;
-            g_modMgr.RefreshTreeViewLabels(g_hTreeView);
-            SetWindowTextW(g_hStatus, L"  ALL STOPPED");
-            DebugLog("[STOP] All modules stopped");
-            break;
-        }
-
-        case IDM_SCALE_UP:
-            g_scale += 0.5f;
-            { wchar_t s[64]; swprintf_s(s, L"  Scale: %.2f", g_scale);
-            SetWindowTextW(g_hStatus, s); }
-            break;
-
-        case IDM_SCALE_DOWN:
-            g_scale -= 0.5f;
-            if (g_scale < 0.5f) g_scale = 0.5f;
-            { wchar_t s[64]; swprintf_s(s, L"  Scale: %.2f", g_scale);
-            SetWindowTextW(g_hStatus, s); }
-            break;
-
         case IDM_DEBUG:
             OpenDebugConsole(hWnd);
-            break;
-
-        case IDM_EXIT:
-            DestroyWindow(hWnd);
             break;
         }
         break;
@@ -1091,16 +1160,32 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (g_hStatus) SendMessage(g_hStatus, WM_SIZE, 0, 0);
         break;
 
+    case WM_CTLCOLORSTATIC: {
+        HDC hdc = (HDC)wParam;
+        HWND hCtrl = (HWND)lParam;
+        for (int i = 0; i < 3; i++) {
+            if (hCtrl == g_hTabBtn[i]) {
+                SetBkMode(hdc, TRANSPARENT);
+                if (i == g_currentTab)
+                    SetTextColor(hdc, RGB(0, 100, 200));
+                else
+                    SetTextColor(hdc, RGB(0, 0, 0));
+                return (LRESULT)GetSysColorBrush(COLOR_BTNFACE);
+            }
+        }
+        break;
+    }
+
     case WM_DESTROY:
         DebugLog("[EXIT] Shutting down...");
-        // Save all configs
         { wchar_t cfgDir[MAX_PATH];
         GetModuleFileNameW(NULL, cfgDir, MAX_PATH);
-        wchar_t* bs = wcsrchr(cfgDir, L'\\'); if (bs) *bs = 0;
-        wcscat_s(cfgDir, L"\\config");
-        g_modMgr.SaveAll(cfgDir); }
-        g_modMgr.StopAll();
+        wchar_t* b = wcsrchr(cfgDir, L'\\'); if (b) *b = 0;
+        wcscat(cfgDir, L"\\config");
+        G->modMgr.SaveAll(cfgDir); }
+        G->modMgr.StopAll();
         if (g_hFont) DeleteObject(g_hFont);
+        if (g_hTreeFont) DeleteObject(g_hTreeFont);
         if (g_hProcess) CloseHandle(g_hProcess);
         if (g_hDebugConsole) DestroyWindow(g_hDebugConsole);
         PostQuitMessage(0);
@@ -1115,21 +1200,23 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 // Entry point
 // ============================================================
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nShow) {
+    G = new BotState();
     g_hInst = hInst;
     INITCOMMONCONTROLSEX icex{sizeof(icex), ICC_TAB_CLASSES|ICC_BAR_CLASSES|ICC_TREEVIEW_CLASSES};
     InitCommonControlsEx(&icex);
+    RegisterPanelClass();
 
     WNDCLASSEXW wc{}; wc.cbSize=sizeof(wc); wc.style=CS_HREDRAW|CS_VREDRAW;
     wc.lpfnWndProc=WndProc; wc.hInstance=hInst;
     wc.hCursor=LoadCursor(NULL,IDC_ARROW); wc.hbrBackground=(HBRUSH)(COLOR_BTNFACE+1);
     wc.lpszClassName=L"WarspearBotCtrl"; RegisterClassExW(&wc);
 
-    g_hWnd=CreateWindowExW(0,L"WarspearBotCtrl",L"Warspear Bot v4",
+    g_hWnd=CreateWindowExW(0,L"WarspearBotCtrl",L"Warspear Bot",
         WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX,
-        CW_USEDEFAULT,CW_USEDEFAULT,610,480,NULL,NULL,hInst,NULL);
+        CW_USEDEFAULT,CW_USEDEFAULT,360,600,NULL,NULL,hInst,NULL);
     if(!g_hWnd) return 0;
     ShowWindow(g_hWnd,nShow); UpdateWindow(g_hWnd);
-    SetTimer(g_hWnd,1,500,NULL);
+    SetTimer(g_hWnd,1,200,NULL);
 
     MSG msg{};
     while(GetMessageW(&msg,NULL,0,0)){TranslateMessage(&msg);DispatchMessageW(&msg);}

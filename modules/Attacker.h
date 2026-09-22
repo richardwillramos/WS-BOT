@@ -40,11 +40,14 @@ public:
         short cx = ReadShort(ctx.hProcess, curPtr + CUR_X_OFFSET);
         short cy = ReadShort(ctx.hProcess, curPtr + CUR_Y_OFFSET);
 
-        // Read mob tile position (raw/65536)
-        int mobRawX = ReadInt(ctx.hProcess, targetAddr + ENT_RAW_X_OFFSET);
-        int mobRawY = ReadInt(ctx.hProcess, targetAddr + ENT_RAW_Y_OFFSET);
-        short mobTX = (short)(mobRawX / 65536);
-        short mobTY = (short)(mobRawY / 65536);
+            // Read mob tile position (raw -> world -> tile)
+            // raw value = tile * 0x180000 = tile * 1572864
+            // world coord = raw / 65536 = tile * 24
+            // tile = raw / (65536 * 24) = raw / 1572864
+            int mobRawX = ReadInt(ctx.hProcess, targetAddr + ENT_RAW_X_OFFSET);
+            int mobRawY = ReadInt(ctx.hProcess, targetAddr + ENT_RAW_Y_OFFSET);
+            short mobTX = (short)(mobRawX / 1572864);
+            short mobTY = (short)(mobRawY / 1572864);
 
         switch (attackState) {
         case 0:
@@ -52,59 +55,70 @@ public:
             attackStepTick = now;
             break;
 
-        case 1: { // MOVING cursor toward mob using arrow keys
-            if (now - attackStepTick < 60) break;
+        case 1: { // Position cursor on mob (NO walk flag - let game detect attack naturally)
+            if (now - attackStepTick < 100) break;
 
             if (cx == mobTX && cy == mobTY) {
                 int action = ReadInt(ctx.hProcess, curPtr + CUR_ACTION_OFFSET);
                 if (action == CURSOR_ACTION_ATTACK_VALUE) {
                     attackState = 2;
+                    attackStepTick = now;
                 }
                 break;
             }
 
-            // Send arrow key via PostMessage to game window
-            HWND gw = ctx.gameWindow;
-            if (gw && IsWindow(gw)) {
-                WORD vk = 0;
-                if (cx < mobTX) vk = VK_RIGHT;
-                else if (cx > mobTX) vk = VK_LEFT;
-                else if (cy < mobTY) vk = VK_DOWN;
-                else if (cy > mobTY) vk = VK_UP;
-
-                if (vk) {
-                    UINT scan = MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
-                    LPARAM keyDown = 1 | ((LPARAM)scan << 16);
-                    LPARAM keyUp = keyDown | (1LL << 30) | (1LL << 31);
-                    PostMessageW(gw, WM_KEYDOWN, vk, keyDown);
-                    PostMessageW(gw, WM_KEYUP, vk, keyUp);
-                }
+            // Write cursor position directly (without walk flag)
+            if (curPtr > 0x1000) {
+                short tx = mobTX, ty = mobTY;
+                int rawX = (int)mobTX * 0x180000;
+                int rawY = (int)mobTY * 0x180000;
+                DWORD noneFlag = 15;
+                WriteProcessMemory(ctx.hProcess, (LPVOID)(curPtr + 0x08), &tx, 2, NULL);
+                WriteProcessMemory(ctx.hProcess, (LPVOID)(curPtr + 0x0A), &ty, 2, NULL);
+                WriteProcessMemory(ctx.hProcess, (LPVOID)(curPtr + 0x10), &rawX, 4, NULL);
+                WriteProcessMemory(ctx.hProcess, (LPVOID)(curPtr + 0x14), &rawY, 4, NULL);
+                WriteProcessMemory(ctx.hProcess, (LPVOID)(curPtr + 0x7C), &noneFlag, 4, NULL);
             }
 
             attackStepTick = now;
             break;
         }
 
-        case 2: { // ATTACK: cursor on mob, action==ATTACK
+        case 2: { // ATTACK confirmed: cursor on mob, action==8, now click
             int action = ReadInt(ctx.hProcess, curPtr + CUR_ACTION_OFFSET);
             if (action != CURSOR_ACTION_ATTACK_VALUE) {
                 attackState = 1;
+                attackStepTick = now;
                 break;
             }
 
+            if (now - attackStepTick < 120) break;
+
             if (now - lastAttackTick < (DWORD)globalCooldownMs) break;
 
-            // Press Enter to attack
+            // Write target address to game's target slots
+            if (ctx.playerAddr > 0x1000) {
+                DWORD ta = targetAddr;
+                WriteProcessMemory(ctx.hProcess, (LPVOID)(ctx.playerAddr + 0x290), &ta, 4, NULL);
+                WriteProcessMemory(ctx.hProcess, (LPVOID)(ctx.playerAddr + 0x478), &ta, 4, NULL);
+            }
+
+            // Send mouse click at cursor position (not Enter - game may ignore PostMessage keys)
             HWND gw = ctx.gameWindow;
             if (gw && IsWindow(gw)) {
-                UINT scan = MapVirtualKeyW(VK_RETURN, MAPVK_VK_TO_VSC);
-                LPARAM keyDown = 1 | ((LPARAM)scan << 16);
-                LPARAM keyUp = keyDown | (1LL << 30) | (1LL << 31);
-                PostMessageW(gw, WM_KEYDOWN, VK_RETURN, keyDown);
-                PostMessageW(gw, WM_KEYUP, VK_RETURN, keyUp);
+                POINT pt = { 0, 0 };
+                ClientToScreen(gw, &pt);
+                int centerX = pt.x + 120;
+                int centerY = pt.y + 200;
+                LPARAM lpClick = MAKELPARAM(centerX, centerY);
+
+                PostMessageW(gw, WM_LBUTTONDOWN, MK_LBUTTON, lpClick);
+                Sleep(30);
+                PostMessageW(gw, WM_LBUTTONUP, 0, lpClick);
             }
 
             lastAttackTick = now;
+            attackStepTick = now;
 
             // Use skills if configured
             for (auto& skill : skills) {
@@ -149,19 +163,19 @@ public:
         skills.clear();
         for (int i = 1; i <= 6; i++) {
             wchar_t sec[16]; swprintf_s(sec, L"Skill%d", i);
-            wchar_t name[64], key[8], cd[8], pri[8], en[4];
+            wchar_t name[64], key[32], cd[16], pri[16], en[16];
             swprintf_s(name, L"%sName", sec);
             swprintf_s(key, L"%sKey", sec);
             swprintf_s(cd, L"%sCooldown", sec);
             swprintf_s(pri, L"%sPriority", sec);
             swprintf_s(en, L"%sEnabled", sec);
 
-            wchar_t vName[64]={}, vKey[8]={}, vCd[8]={}, vPri[8]={}, vEn[4]={};
+            wchar_t vName[64]={}, vKey[32]={}, vCd[16]={}, vPri[16]={}, vEn[16]={};
             GetPrivateProfileStringW(L"Attacker", name, L"", vName, 64, path);
-            GetPrivateProfileStringW(L"Attacker", key, L"", vKey, 8, path);
-            GetPrivateProfileStringW(L"Attacker", cd, L"0", vCd, 8, path);
-            GetPrivateProfileStringW(L"Attacker", pri, L"0", vPri, 8, path);
-            GetPrivateProfileStringW(L"Attacker", en, L"1", vEn, 4, path);
+            GetPrivateProfileStringW(L"Attacker", key, L"", vKey, 32, path);
+            GetPrivateProfileStringW(L"Attacker", cd, L"0", vCd, 16, path);
+            GetPrivateProfileStringW(L"Attacker", pri, L"0", vPri, 16, path);
+            GetPrivateProfileStringW(L"Attacker", en, L"1", vEn, 16, path);
             if (vName[0] == 0 && vKey[0] == 0) break;
 
             SkillEntry s;

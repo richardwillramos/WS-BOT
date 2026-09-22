@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(cmd.exe /c \"call \\\\\"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\18\\\\Community\\\\VC\\\\Auxiliary\\\\Build\\\\vcvars32.bat\\\\\" && cl /O2 /EHsc /MT /LD dllmain.cpp /Fewarspear-bot22.dll /link user32.lib\")",
-      "Bash(cmd.exe /c \"F:\\\\WS\\\\BOT-CE\\\\warspear-botv1.4\\\\build-dll.bat\")",
-      "Bash(cmd.exe /c \"F:\\\\WS\\\\BOT-CE\\\\warspear-botv1.4\\\\controller\\\\build.bat\")"
-    ]
-  }
-}

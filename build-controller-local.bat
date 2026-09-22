@@ -14,7 +14,7 @@ cd /d "C:\Users\Admin\Documents\GitHub\WS-BOT"
 echo.
 echo === Compilando warspear-controller.exe ===
 
-cl /nologo /O2 /EHsc /MT ^
+cl /nologo /O2 /EHsc /MTd /GS- ^
     controller\main.cpp ^
     /Fe:warspear-controller.exe ^
     /link ^
@@ -23,7 +23,8 @@ cl /nologo /O2 /EHsc /MT ^
     kernel32.lib ^
     comctl32.lib ^
     comdlg32.lib ^
-    psapi.lib
+    psapi.lib ^
+    /SUBSYSTEM:WINDOWS
 
 set "BUILD_EXIT_CODE=%ERRORLEVEL%"
 

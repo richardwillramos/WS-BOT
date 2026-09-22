@@ -147,6 +147,13 @@ inline int GetEntityMaxMana(DWORD objPtr) {
     return (int)ReadDword(objPtr + ENT_MAX_MANA);
 }
 
+// ---- Cursor struct offsets (from cursor_ptr) ----
+constexpr DWORD CUR_X     = 0x08;  // WORD: tile X
+constexpr DWORD CUR_Y     = 0x0A;  // WORD: tile Y
+constexpr DWORD CUR_RAW_X = 0x10;  // int: raw X (tile * 0x180000)
+constexpr DWORD CUR_RAW_Y = 0x14;  // int: raw Y
+constexpr DWORD CUR_FLAG  = 0x7C;  // DWORD: 0x10=walk, action state
+
 // ---- Cursor action flags (at cursor_ptr + CUR_FLAG) ----
 constexpr int CURSOR_ACTION_ATTACK = 8;   // sword icon, cursor over attackable entity
 constexpr int CURSOR_ACTION_MOVE   = 13;  // boot icon, cursor over walkable tile

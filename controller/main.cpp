@@ -1,5 +1,5 @@
 // warspear-controller/main.cpp
-// Warspear Bot Controller v3 - Connect, Browse DLL, Hotkeys, Attack, Follow
+// Warspear Bot Controller v4 - Modular Architecture
 
 #include <Windows.h>
 #include <CommCtrl.h>
@@ -15,6 +15,19 @@
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "psapi.lib")
 
+#include "../include/IModule.h"
+#include "../include/ModuleManager.h"
+#include "../modules/Targeter.h"
+#include "../modules/Attacker.h"
+#include "../modules/Healer.h"
+#include "../modules/PartyHealer.h"
+#include "../modules/Looter.h"
+#include "../modules/Follower.h"
+#include "../modules/Extra.h"
+
+// ============================================================
+// Game constants
+// ============================================================
 namespace Game {
     constexpr DWORD GM_PTR      = 0x00D387AC;
     constexpr DWORD GM_OFFSET   = 0x14;
@@ -36,29 +49,28 @@ namespace Game {
     constexpr DWORD ENT_MANA      = 0x114;
     constexpr DWORD ENT_MAX_MANA  = 0x118;
     constexpr DWORD ENT_LEVEL     = 0x2E0;
-    constexpr DWORD ENT_CLASS_IND = 0x3ED;  // byte, not int!
+    constexpr DWORD ENT_CLASS_IND = 0x3ED;
     constexpr DWORD VT_PLAYER  = 0x00C80F9C;
     constexpr DWORD VT_BEAST   = 0x00C81490;
     constexpr DWORD VT_CORPSE  = 0x00C4FC5C;
     constexpr DWORD OBJ_OBJECT_ID  = 0x120;
     constexpr DWORD OBJ_TYPE_ID    = 0x124;
-    constexpr DWORD OBJ_LIFETIME   = 0x128;
-
-    // Cursor object (Ghidra: cursor.cpp FUN_006C5CE0, FUN_006C4EA0)
-    constexpr DWORD CURSOR_OFFSET  = 0x123C;  // GM_base + 0x123C -> cursor object
-    constexpr DWORD CUR_X          = 0x08;     // WORD tile X
-    constexpr DWORD CUR_Y          = 0x0A;     // WORD tile Y
-    constexpr DWORD CUR_RAW_X      = 0x10;     // int raw X (tile * 0x180000)
-    constexpr DWORD CUR_RAW_Y      = 0x14;     // int raw Y
-    constexpr DWORD CUR_FLAG       = 0x7C;     // DWORD: 0x10=walk
+    constexpr DWORD CURSOR_OFFSET  = 0x123C;
+    constexpr DWORD CUR_X          = 0x08;
+    constexpr DWORD CUR_Y          = 0x0A;
+    constexpr DWORD CUR_RAW_X      = 0x10;
+    constexpr DWORD CUR_RAW_Y      = 0x14;
+    constexpr DWORD CUR_FLAG       = 0x7C;
 }
 
+// ============================================================
+// Entity data structures
+// ============================================================
 struct EntityData {
     wchar_t name[64];
     float x, y;
     int hp, maxHp, mana, maxMana;
-    int level;
-    int classId;
+    int level, classId;
     float distance;
     int type;
     DWORD objAddr;
@@ -69,13 +81,79 @@ struct CorpseData {
     float x, y;
     float distance;
     DWORD objAddr;
-    WORD objectId;
-    WORD typeId;
+    WORD objectId, typeId;
 };
+
+// ============================================================
+// Globals
+// ============================================================
+static HINSTANCE g_hInst = NULL;
+static HWND g_hWnd = NULL;
+static HMENU g_hMenu = NULL;
+static HWND g_hStatus = NULL;
+static HWND g_hTreeView = NULL;
+static HWND g_hDetailPanel = NULL;
 
 static HANDLE g_hProcess = NULL;
 static DWORD  g_gamePid  = 0;
+static bool   g_connected = false;
+static bool   g_dllInjected = false;
+static float  g_selfX = 0, g_selfY = 0;
+static float  g_scale = 3.5f;
 
+static std::vector<EntityData> g_cachedMobs, g_cachedPlayers, g_cachedNpcs;
+static std::vector<CorpseData> g_cachedCorpses;
+static DWORD g_playerAddr = 0, g_gmAddr = 0;
+
+// Module manager
+static ModuleManager g_modMgr;
+static TargeterModule  g_targeter;
+static AttackerModule  g_attacker;
+static HealerModule    g_healer;
+static PartyHealerModule g_partyHealer;
+static LooterModule    g_looter;
+static FollowerModule  g_follower;
+static ExtraModule     g_extra;
+
+// Active module UI panel
+static IModule* g_activeModule = nullptr;
+
+// Process listing
+struct ProcInfo { DWORD pid; std::wstring name; };
+static std::vector<ProcInfo> g_procs;
+static std::vector<int> g_listToProc;
+
+// DLL shared memory
+struct BotCmd {
+    volatile long attackOn, followOn, healOn, healThreshold, targetAddr, followAddr;
+};
+static HANDLE g_hSharedMem = NULL;
+static BotCmd* g_pBotCmd = NULL;
+
+// Menu IDs
+enum MenuID {
+    IDM_CONFIG = 1001,
+    IDM_QUICK,
+    IDM_CONNECTION,
+    IDM_REFRESH,
+    IDM_CONNECT,
+    IDM_INJECT,
+    IDM_BROWSE_DLL,
+    IDM_TOGGLE_ATTACK,
+    IDM_TOGGLE_FOLLOW,
+    IDM_TOGGLE_LOOT,
+    IDM_TOGGLE_HEAL,
+    IDM_TOGGLE_ALL,
+    IDM_STOP_ALL,
+    IDM_SCALE_UP,
+    IDM_SCALE_DOWN,
+    IDM_DEBUG,
+    IDM_EXIT,
+};
+
+// ============================================================
+// Memory helpers
+// ============================================================
 template<typename T>
 T Read(DWORD addr) {
     T val{};
@@ -96,6 +174,9 @@ float CalcDist(float x1, float y1, float x2, float y2) {
     return sqrtf(dx*dx + dy*dy);
 }
 
+// ============================================================
+// NPC / Class helpers
+// ============================================================
 static const wchar_t* NPC_NAMES[] = {
     L"Miliciano", L"Guarda", L"Balisteiro", L"Almoxarife", L"Vicente",
     L"Leiloeira Ilse", L"Vilma", L"Rokus", L"Mestre Hedwig",
@@ -107,31 +188,24 @@ bool IsNPC(const std::wstring& n) { for (int i=0;i<NPC_COUNT;i++) if(n==NPC_NAME
 
 const wchar_t* GetClassName(int classId) {
     switch(classId) {
-        case 0:  return L"Undefined";
-        case 1:  return L"Paladin";
-        case 2:  return L"Priest";
-        case 3:  return L"Mage";
-        case 4:  return L"Barbarian";
-        case 5:  return L"Rogue";
-        case 6:  return L"Shaman";
-        case 7:  return L"Bladedancer";
-        case 8:  return L"Ranger";
-        case 9:  return L"Druid";
-        case 10: return L"Deathknight";
-        case 11: return L"Necromancer";
-        case 12: return L"Warlock";
-        case 13: return L"Seeker";
-        case 14: return L"Hunter";
-        case 15: return L"Warden";
-        case 16: return L"Charmer";
-        case 17: return L"Templar";
-        case 18: return L"Chieftain";
-        case 19: return L"Beastmaster";
+        case 0:  return L"Undefined";   case 1:  return L"Paladin";
+        case 2:  return L"Priest";      case 3:  return L"Mage";
+        case 4:  return L"Barbarian";   case 5:  return L"Rogue";
+        case 6:  return L"Shaman";      case 7:  return L"Bladedancer";
+        case 8:  return L"Ranger";      case 9:  return L"Druid";
+        case 10: return L"Deathknight"; case 11: return L"Necromancer";
+        case 12: return L"Warlock";     case 13: return L"Seeker";
+        case 14: return L"Hunter";      case 15: return L"Warden";
+        case 16: return L"Charmer";     case 17: return L"Templar";
+        case 18: return L"Chieftain";   case 19: return L"Beastmaster";
         case 20: return L"Reaper";
         default: return L"Unknown";
     }
 }
 
+// ============================================================
+// Entity tree traversal
+// ============================================================
 void TraverseTree(DWORD node, std::vector<EntityData>& entities, std::vector<CorpseData>& corpses, float selfX, float selfY) {
     if (node <= 0x1000) return;
     DWORD left  = Read<DWORD>(node + Game::TN_LEFT);
@@ -144,7 +218,6 @@ void TraverseTree(DWORD node, std::vector<EntityData>& entities, std::vector<Cor
     DWORD vtable = Read<DWORD>(objPtr + Game::ENT_VTABLE);
     int hp = Read<int>(objPtr + Game::ENT_HP);
 
-    // Check if this is a corpse: HP < 0 means dead (e.g. -24 = 0xFFFFFFE8)
     if (hp < 0) {
         CorpseData c{};
         c.objAddr = objPtr;
@@ -182,7 +255,7 @@ void TraverseTree(DWORD node, std::vector<EntityData>& entities, std::vector<Cor
     else if (IsNPC(e.name)) e.type=3;
     else e.type=2;
     e.level=Read<int>(objPtr+Game::ENT_LEVEL);
-    e.classId=Read<int>(objPtr+Game::ENT_CLASS_IND);
+    e.classId=Read<BYTE>(objPtr+Game::ENT_CLASS_IND);
     e.distance=CalcDist(selfX,selfY,e.x,e.y);
     if (e.hp==0&&e.maxHp==0) return;
     entities.push_back(e);
@@ -190,9 +263,9 @@ void TraverseTree(DWORD node, std::vector<EntityData>& entities, std::vector<Cor
 
 bool ReadGameState(float& sx, float& sy, int& hp, int& mhp, int& mn, int& mmn,
                    std::wstring& name, int& level, int& classId,
-                   std::vector<EntityData>& pl,
-                   std::vector<EntityData>& mb, std::vector<EntityData>& np,
-                   std::vector<CorpseData>& corpses, DWORD* outPlayerAddr=nullptr, DWORD* outGM=nullptr) {
+                   std::vector<EntityData>& pl, std::vector<EntityData>& mb,
+                   std::vector<EntityData>& np, std::vector<CorpseData>& corpses,
+                   DWORD* outPlayerAddr=nullptr, DWORD* outGM=nullptr) {
     pl.clear(); mb.clear(); np.clear(); corpses.clear();
     DWORD gmPtr=Read<DWORD>(Game::GM_PTR); if(gmPtr<=0x1000) return false;
     DWORD gm=Read<DWORD>(gmPtr+Game::GM_OFFSET); if(gm<=0x1000) return false;
@@ -207,7 +280,6 @@ bool ReadGameState(float& sx, float& sy, int& hp, int& mhp, int& mn, int& mmn,
     DWORD np2=Read<DWORD>(lp+Game::ENT_NAME_PTR); int nl=Read<int>(lp+Game::ENT_NAME_LEN);
     if(nl>0&&nl<64&&np2>0x1000){wchar_t w[64]={};for(int i=0;i<nl;i++){wchar_t c=Read<wchar_t>(np2+i*2);if(c==0)break;w[i]=c;}name=w;}
     else name=L"(unknown)";
-
     DWORD th=Read<DWORD>(gm+Game::ENTITY_TREE); if(th<=0x1000) return false;
     DWORD root=Read<DWORD>(th+Game::TH_ROOT);
     std::vector<EntityData> all;
@@ -223,96 +295,7 @@ bool ReadGameState(float& sx, float& sy, int& hp, int& mhp, int& mn, int& mmn,
 }
 
 // ============================================================
-// Globals
-// ============================================================
-static HINSTANCE g_hInst=NULL; static HWND g_hWnd=NULL; static HFONT g_hFont=NULL;
-static HWND g_hTab=NULL, g_hStatus=NULL;
-
-// Tab 0: Connection
-static HWND g_hDllLabel, g_hDllPath, g_hBtnBrowse, g_hBtnRefresh, g_hBtnConnect, g_hBtnInjectDll, g_hProcList;
-
-// Tab 1: Bot
-static HWND g_hChkAttack, g_hChkHeal, g_hChkFollow, g_hChkLoot;
-static HWND g_hHealLabel, g_hHealThreshold, g_hHealPct;
-static HWND g_hAtkNameLabel, g_hAtkName;
-
-// Tab 2: Players
-static HWND g_hFollowTitle, g_hFollowName, g_hFollowDist, g_hBtnFollowClear, g_hPlayerList;
-
-// Tab 3: Mobs
-static HWND g_hTargetTitle, g_hTargetName, g_hTargetHP, g_hBtnTargetClear, g_hMobList;
-
-// Tab 4: NPCs
-static HWND g_hNpcList;
-
-// State
-static DWORD g_selectedTargetAddr=0; static wchar_t g_selTargetName[64]={};
-static std::vector<EntityData> g_cachedMobs;
-static std::vector<EntityData> g_prevMobs;  // Previous frame mobs for death detection
-static DWORD g_followTargetAddr=0; static wchar_t g_followName[64]={};
-static std::vector<EntityData> g_cachedPlayers;
-static std::vector<CorpseData> g_cachedCorpses;
-static float g_selfX=0, g_selfY=0;
-static float g_scale=3.5f;  // pixels per game unit, adjustable via F5/F6
-static bool g_connected=false;
-static bool g_followPaused=false;  // true when target lost due to zone change
-static bool g_dllInjected=false;
-
-// Dead mob addresses - prevent re-targeting before cache refresh
-static DWORD g_deadAddrs[16] = {};
-static int g_deadIdx = 0;
-static bool IsDeadAddr(DWORD addr) { for(int i=0;i<16;i++) if(g_deadAddrs[i]==addr) return true; return false; }
-static void MarkDead(DWORD addr) { g_deadAddrs[g_deadIdx & 15] = addr; g_deadIdx++; }
-static wchar_t g_attackMobFilter[64]={};
-static bool g_autoLoot=false;
-
-// Pending corpse (position saved when mob dies, used by loot timer)
-static bool g_hasPendingCorpse=false;
-static float g_pendingCorpseX=0, g_pendingCorpseY=0;
-static DWORD g_pendingCorpseAddr=0;
-static wchar_t g_pendingCorpseName[64]={};
-static DWORD g_pendingCorpseTime=0;
-
-// Stats
-static int g_killCount=0;
-static int g_lootCount=0;
-static int g_lootClickCount=0;
-static wchar_t g_lastLootName[64]={};
-static DWORD g_lastLootTime=0;
-
-// Shared memory with DLL
-struct BotCmd {
-    volatile long attackOn;
-    volatile long followOn;
-    volatile long healOn;
-    volatile long healThreshold;
-    volatile long targetAddr;
-    volatile long followAddr;
-};
-static HANDLE g_hSharedMem=NULL;
-static BotCmd* g_pBotCmd=NULL;
-
-bool OpenBotSharedMem() {
-    g_hSharedMem = OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, L"Local\\WarspearBotShared");
-    if (!g_hSharedMem) return false;
-    g_pBotCmd = (BotCmd*)MapViewOfFile(g_hSharedMem, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(BotCmd));
-    return g_pBotCmd != NULL;
-}
-
-void UpdateBotCmd() {
-    if (!g_pBotCmd) return;
-    g_pBotCmd->attackOn = (g_selectedTargetAddr > 0x1000) ? 1 : 0;
-    g_pBotCmd->targetAddr = g_selectedTargetAddr;
-    g_pBotCmd->followOn = (g_followTargetAddr > 0x1000) ? 1 : 0;
-    g_pBotCmd->followAddr = g_followTargetAddr;
-}
-
-struct ProcInfo { DWORD pid; std::wstring name; };
-static std::vector<ProcInfo> g_procs;
-static std::vector<int> g_listToProc; // maps listbox index -> g_procs index
-
-// ============================================================
-// Debug Console
+// Debug console
 // ============================================================
 static HWND g_hDebugConsole = NULL;
 static HWND g_hDebugEdit = NULL;
@@ -320,14 +303,10 @@ static bool g_debugConsoleOpen = false;
 
 void DebugLog(const char* fmt, ...) {
     char buf[1024];
-    va_list args;
-    va_start(args, fmt);
+    va_list args; va_start(args, fmt);
     _vsnprintf(buf, sizeof(buf), fmt, args);
     va_end(args);
-
-    OutputDebugStringA(buf);
-    OutputDebugStringA("\n");
-
+    OutputDebugStringA(buf); OutputDebugStringA("\n");
     if (g_hDebugEdit) {
         int len = GetWindowTextLengthA(g_hDebugEdit);
         SendMessageA(g_hDebugEdit, EM_SETSEL, len, len);
@@ -339,47 +318,32 @@ void DebugLog(const char* fmt, ...) {
 
 void OpenDebugConsole(HWND parent) {
     if (g_debugConsoleOpen) return;
-
     WNDCLASSEXW wc{}; wc.cbSize=sizeof(wc);
     wc.lpfnWndProc=DefWindowProcW; wc.hInstance=g_hInst;
     wc.hCursor=LoadCursor(NULL,IDC_ARROW);
     wc.hbrBackground=(HBRUSH)(COLOR_BTNFACE+1);
     wc.lpszClassName=L"DebugConsoleWnd";
     RegisterClassExW(&wc);
-
     g_hDebugConsole = CreateWindowExW(WS_EX_TOOLWINDOW, L"DebugConsoleWnd",
         L"Bot Debug Console", WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX,
         parent ? 700 : CW_USEDEFAULT, parent ? 50 : CW_USEDEFAULT,
         550, 400, parent, NULL, g_hInst, NULL);
-
     g_hDebugEdit = CreateWindowExW(0, L"EDIT", L"",
         WS_CHILD|WS_VISIBLE|WS_VSCROLL|ES_MULTILINE|ES_AUTOVSCROLL|ES_READONLY,
         5, 5, 535, 355, g_hDebugConsole, NULL, g_hInst, NULL);
-
     HFONT hMono = CreateFontW(-12, 0, 0, 0, FW_NORMAL, 0, 0, 0,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
         DEFAULT_QUALITY, FIXED_PITCH|FF_MODERN, L"Consolas");
     SendMessageW(g_hDebugEdit, WM_SETFONT, (WPARAM)hMono, TRUE);
-
     ShowWindow(g_hDebugConsole, SW_SHOW);
     UpdateWindow(g_hDebugConsole);
     g_debugConsoleOpen = true;
-
     DebugLog("=== Bot Debug Console Started ===");
     DebugLog("PID: %d", g_gamePid);
 }
 
-void CloseDebugConsole() {
-    if (g_hDebugConsole) {
-        DestroyWindow(g_hDebugConsole);
-        g_hDebugConsole = NULL;
-        g_hDebugEdit = NULL;
-        g_debugConsoleOpen = false;
-    }
-}
-
 // ============================================================
-// Find game window
+// Find game window (PID-based)
 // ============================================================
 HWND FindGameWindow() {
     if(g_gamePid) {
@@ -394,47 +358,49 @@ HWND FindGameWindow() {
 }
 
 // ============================================================
-// Game interaction
+// Game interaction helpers
 // ============================================================
-bool IsGameForeground() {
-    HWND fg = GetForegroundWindow();
-    return fg == FindGameWindow();
+DWORD GetCursorAddr() {
+    DWORD gmPtr = Read<DWORD>(Game::GM_PTR);
+    if (gmPtr <= 0x1000) return 0;
+    DWORD gm = Read<DWORD>(gmPtr + Game::GM_OFFSET);
+    if (gm <= 0x1000) return 0;
+    return Read<DWORD>(gm + Game::CURSOR_OFFSET);
 }
 
-void SendEnterAttack() {
+bool WriteCursorPos(WORD tileX, WORD tileY) {
+    DWORD cur = GetCursorAddr();
+    if (cur <= 0x1000) return false;
+    if (tileX > 27) tileX = 27;
+    if (tileY > 27) tileY = 27;
+    Write<WORD>(cur + Game::CUR_X, tileX);
+    Write<WORD>(cur + Game::CUR_Y, tileY);
+    int rawX = (int)tileX * 0x180000;
+    int rawY = (int)tileY * 0x180000;
+    Write<int>(cur + Game::CUR_RAW_X, rawX);
+    Write<int>(cur + Game::CUR_RAW_Y, rawY);
+    return true;
+}
+
+bool MoveToTile(float gameX, float gameY) {
+    WORD tileX = (WORD)((int)(gameX / 24.0f));
+    WORD tileY = (WORD)((int)(gameY / 24.0f));
+    if (tileX > 27) tileX = 27;
+    if (tileY > 27) tileY = 27;
+    if (!WriteCursorPos(tileX, tileY)) return false;
+    Sleep(30);
     HWND gw = FindGameWindow();
-    if (!gw || GetForegroundWindow() != gw || IsIconic(gw)) return;
+    if (!gw) return false;
     keybd_event(VK_RETURN, 0, 0, 0);
     Sleep(30);
     keybd_event(VK_RETURN, 0, KEYEVENTF_KEYUP, 0);
-}
-
-bool WriteGameTarget(DWORD addr) {
-    if(!g_hProcess||addr<=0x1000) return false;
-    DWORD gmPtr=Read<DWORD>(Game::GM_PTR); if(gmPtr<=0x1000) return false;
-    DWORD gm=Read<DWORD>(gmPtr+Game::GM_OFFSET); if(gm<=0x1000) return false;
-    DWORD lp=Read<DWORD>(gm+Game::LP_OFFSET); if(lp<=0x1000) return false;
-    DWORD dw=0;
-    WriteProcessMemory(g_hProcess,(LPVOID)(lp+0x290),&addr,4,&dw);
-    WriteProcessMemory(g_hProcess,(LPVOID)(lp+0x478),&addr,4,&dw);
-    return dw==4;
+    return true;
 }
 
 void ClickAtClient(int cx, int cy) {
     HWND w=FindGameWindow(); if(!w) return;
-    // Only click if game window is foreground and not minimized
     if(GetForegroundWindow()!=w || IsIconic(w)) return;
-    // Force foreground
-    DWORD fgTid = GetWindowThreadProcessId(w, NULL);
-    DWORD myTid = GetCurrentThreadId();
-    AttachThreadInput(myTid, fgTid, TRUE);
-    SetForegroundWindow(w);
-    AttachThreadInput(myTid, fgTid, FALSE);
-    // Re-check after attach
-    if(GetForegroundWindow()!=w) return;
-    // Convert client coords and click
     POINT pt={cx,cy}; ClientToScreen(w,&pt);
-    // Bounds check: click must be within screen
     int sx=GetSystemMetrics(SM_CXSCREEN), sy=GetSystemMetrics(SM_CYSCREEN);
     if(pt.x<0||pt.x>=sx||pt.y<0||pt.y>=sy) return;
     INPUT in[3]={};
@@ -447,67 +413,6 @@ void ClickAtClient(int cx, int cy) {
     SendInput(3,in,sizeof(INPUT));
 }
 
-void MoveMouseToClient(int cx, int cy) {
-    HWND w=FindGameWindow(); if(!w) return;
-    if(GetForegroundWindow()!=w || IsIconic(w)) return;
-    DWORD fgTid = GetWindowThreadProcessId(w, NULL);
-    DWORD myTid = GetCurrentThreadId();
-    AttachThreadInput(myTid, fgTid, TRUE);
-    SetForegroundWindow(w);
-    AttachThreadInput(myTid, fgTid, FALSE);
-    if(GetForegroundWindow()!=w) return;
-    POINT pt={cx,cy}; ClientToScreen(w,&pt);
-    int sx=GetSystemMetrics(SM_CXSCREEN), sy=GetSystemMetrics(SM_CYSCREEN);
-    if(pt.x<0||pt.x>=sx||pt.y<0||pt.y>=sy) return;
-    INPUT in={};
-    in.type=INPUT_MOUSE;
-    in.mi.dx=(LONG)(pt.x*65536.0/sx);
-    in.mi.dy=(LONG)(pt.y*65536.0/sy);
-    in.mi.dwFlags=MOUSEEVENTF_MOVE|MOUSEEVENTF_ABSOLUTE;
-    SendInput(1,&in,sizeof(INPUT));
-}
-
-void SendInputKey(WORD vk) {
-    INPUT in[2]={};
-    in[0].type=INPUT_KEYBOARD;
-    in[0].ki.wVk=vk;
-    in[1].type=INPUT_KEYBOARD;
-    in[1].ki.wVk=vk;
-    in[1].ki.dwFlags=KEYEVENTF_KEYUP;
-    SendInput(2,in,sizeof(INPUT));
-}
-
-// Convert game coordinates to client-area coordinates
-// Warspear 2D top-down: game+X = screen RIGHT, game+Y = screen DOWN
-// Player is always centered on screen. Scale = pixels per game unit.
-bool GameToClient(float gx, float gy, int& cx, int& cy) {
-    HWND w = FindGameWindow();
-    if (!w) return false;
-    RECT rc;
-    GetClientRect(w, &rc);
-    int midX = (rc.right - rc.left) / 2;
-    int midY = (rc.bottom - rc.top) / 2;
-
-    float dx = gx - g_selfX;
-    float dy = gy - g_selfY;
-    float len = sqrtf(dx*dx + dy*dy);
-    if (len < 0.5f) { cx = midX; cy = midY; return true; }
-
-    static bool logged = false;
-    if (!logged) {
-        DebugLog("[CALIBRATE] Window client: %dx%d center=(%d,%d) scale=%.2f", rc.right, rc.bottom, midX, midY, g_scale);
-        logged = true;
-    }
-
-    cx = midX + (int)(dx * g_scale);
-    cy = midY + (int)(dy * g_scale);
-
-    if (cx < 5) cx = 5; if (cx > rc.right - 5) cx = rc.right - 5;
-    if (cy < 5) cy = 5; if (cy > rc.bottom - 5) cy = rc.bottom - 5;
-    return true;
-}
-
-// Move Windows mouse to client coords WITHOUT clicking (cursor hover only)
 void MoveToClient(int cx, int cy) {
     HWND w = FindGameWindow();
     if (!w) return;
@@ -523,298 +428,94 @@ void MoveToClient(int cx, int cy) {
     SendInput(1, &in, sizeof(INPUT));
 }
 
-// Click once at empty ground to deselect any current target/selection
-void ClickGroundDeselect() {
+bool GameToClient(float gx, float gy, int& cx, int& cy) {
     HWND w = FindGameWindow();
-    if (!w || GetForegroundWindow() != w || IsIconic(w)) return;
-    RECT rc;
-    GetClientRect(w, &rc);
-    int gx = (rc.right - rc.left) / 2 + 60;
-    int gy = (rc.bottom - rc.top) / 2 + 60;
-    if (gx > rc.right - 10) gx = rc.right - 10;
-    if (gy > rc.bottom - 10) gy = rc.bottom - 10;
-    DebugLog("[DESEL] Click ground at client(%d,%d)", gx, gy);
-    ClickAtClient(gx, gy);
-}
-
-// ============================================================
-// Cursor-based movement (write cursor X/Y + Enter)
-// ============================================================
-DWORD GetCursorAddr() {
-    DWORD gmPtr = Read<DWORD>(Game::GM_PTR);
-    if (gmPtr <= 0x1000) return 0;
-    DWORD gm = Read<DWORD>(gmPtr + Game::GM_OFFSET);
-    if (gm <= 0x1000) return 0;
-    return Read<DWORD>(gm + Game::CURSOR_OFFSET);
-}
-
-// Write tile position to cursor memory ( FUN_006C6290 equivalent)
-// Writes X/Y, raw pixel (tile*0x180000), packed coords, hash, and walk flag
-bool WriteCursorPos(WORD tileX, WORD tileY) {
-    DWORD cur = GetCursorAddr();
-    if (cur <= 0x1000) {
-        DebugLog("[CURSOR] Invalid cursor addr: 0x%08X", cur);
-        return false;
-    }
-    if (tileX > 27) tileX = 27;
-    if (tileY > 27) tileY = 27;
-
-    Write<WORD>(cur + Game::CUR_X, tileX);
-    Write<WORD>(cur + Game::CUR_Y, tileY);
-
-    int rawX = (int)tileX * 0x180000;
-    int rawY = (int)tileY * 0x180000;
-    Write<int>(cur + Game::CUR_RAW_X, rawX);
-    Write<int>(cur + Game::CUR_RAW_Y, rawY);
-
-    DebugLog("[CURSOR] Wrote tile(%d,%d) raw(%d,%d)", tileX, tileY, rawX, rawY);
+    if (!w) return false;
+    RECT rc; GetClientRect(w, &rc);
+    int midX = (rc.right - rc.left) / 2;
+    int midY = (rc.bottom - rc.top) / 2;
+    float dx = gx - g_selfX;
+    float dy = gy - g_selfY;
+    float len = sqrtf(dx*dx + dy*dy);
+    if (len < 0.5f) { cx = midX; cy = midY; return true; }
+    cx = midX + (int)(dx * g_scale);
+    cy = midY + (int)(dy * g_scale);
+    if (cx < 5) cx = 5; if (cx > rc.right - 5) cx = rc.right - 5;
+    if (cy < 5) cy = 5; if (cy > rc.bottom - 5) cy = rc.bottom - 5;
     return true;
 }
 
-// Move to tile position using cursor memory + Enter key
-// Game tile = gameCoord / 24. Raw = tile * 0x180000
-bool MoveToTile(float gameX, float gameY) {
-    // Convert game coords to tile coords (1 tile = 24 game units)
-    WORD tileX = (WORD)((int)(gameX / 24.0f));
-    WORD tileY = (WORD)((int)(gameY / 24.0f));
-
-    // Clamp to valid range (0-27)
-    if (tileX > 27) tileX = 27;
-    if (tileY > 27) tileY = 27;
-
-    DebugLog("[MOVE] game(%.1f,%.1f) -> tile(%d,%d)", gameX, gameY, tileX, tileY);
-
-    if (!WriteCursorPos(tileX, tileY)) return false;
-
-    Sleep(30);
-
-    // Press Enter to confirm walk
-    HWND gw = FindGameWindow();
-    if (!gw) return false;
-
-    // Temporarily restore focus if needed
-    DWORD fgTid = GetWindowThreadProcessId(gw, NULL);
-    DWORD myTid = GetCurrentThreadId();
-    AttachThreadInput(myTid, fgTid, TRUE);
-    SetForegroundWindow(gw);
-    AttachThreadInput(myTid, fgTid, FALSE);
-
-    SendEnterAttack();
-    DebugLog("[MOVE] Enter sent");
-    return true;
+void SendInputKey(WORD vk) {
+    INPUT in[2]={};
+    in[0].type=INPUT_KEYBOARD; in[0].ki.wVk=vk;
+    in[1].type=INPUT_KEYBOARD; in[1].ki.wVk=vk; in[1].ki.dwFlags=KEYEVENTF_KEYUP;
+    SendInput(2,in,sizeof(INPUT));
 }
 
-// Full attack sequence: deselect -> hover mob -> click mob
-void AttackMob(DWORD mobAddr, float mobGameX, float mobGameY) {
-    HWND gw = FindGameWindow();
-    if (!gw || GetForegroundWindow() != gw || IsIconic(gw)) return;
+// ============================================================
+// Build GameContext from current state
+// ============================================================
+GameContext BuildContext() {
+    GameContext ctx{};
+    ctx.hProcess = g_hProcess;
+    ctx.gamePid = g_gamePid;
+    ctx.selfX = g_selfX;
+    ctx.selfY = g_selfY;
+    ctx.playerAddr = g_playerAddr;
+    ctx.gmAddr = g_gmAddr;
+    ctx.gameWindow = FindGameWindow();
+    ctx.tickCount = GetTickCount();
 
-    DebugLog("[ATTACK] mob addr=0x%08X game(%.1f,%.1f) self(%.1f,%.1f)",
-        mobAddr, mobGameX, mobGameY, g_selfX, g_selfY);
-
-    // Step 1: Click on ground to deselect any stale selection
-    ClickGroundDeselect();
-    Sleep(300);
-
-    // Step 2: Move mouse to mob's screen position (hover)
-    int mobCX, mobCY;
-    if (!GameToClient(mobGameX, mobGameY, mobCX, mobCY)) {
-        DebugLog("[ATTACK] GameToClient failed");
-        return;
-    }
-    DebugLog("[ATTACK] Hover mob at client(%d,%d)", mobCX, mobCY);
-    MoveToClient(mobCX, mobCY);
-
-    // Step 3: Wait for game to process cursor hover and show sword icon
-    Sleep(500);
-
-    // Step 4: Click on mob (game sees cursor over mob = attack)
-    DebugLog("[ATTACK] Click mob at client(%d,%d)", mobCX, mobCY);
-    ClickAtClient(mobCX, mobCY);
-}
-
-void FollowTarget() {
-    if(g_followTargetAddr<=0x1000||!g_hProcess) return;
-    SIZE_T r=0; int rx=0,ry=0;
-    ReadProcessMemory(g_hProcess,(LPCVOID)(g_followTargetAddr+Game::ENT_RAW_X),&rx,4,&r);
-    ReadProcessMemory(g_hProcess,(LPCVOID)(g_followTargetAddr+Game::ENT_RAW_Y),&ry,4,&r);
-    float tx=rx/65536.0f, ty=ry/65536.0f;
-    float dx=tx-g_selfX, dy=ty-g_selfY;
-    float dist=sqrtf(dx*dx+dy*dy);
-
-    DebugLog("[FOLLOW] target=(%.1f,%.1f) self=(%.1f,%.1f) dist=%.1f", tx, ty, g_selfX, g_selfY, dist);
-
-    if(dist<1.0f) return;
-
-    // Cursor-based movement: write tile coords + raw pixel + flag, then Enter
-    DebugLog("[FOLLOW] MoveToTile game(%.1f,%.1f)", tx, ty);
-    MoveToTile(tx, ty);
-}
-
-// Find a player entity by name in the current entity tree
-// Returns the entity's objAddr if found, 0 otherwise
-DWORD FindPlayerByName(const wchar_t* name) {
-    if (!name || name[0] == 0 || !g_hProcess) return 0;
-    DWORD gmPtr = Read<DWORD>(Game::GM_PTR); if (gmPtr <= 0x1000) return 0;
-    DWORD gm = Read<DWORD>(gmPtr + Game::GM_OFFSET); if (gm <= 0x1000) return 0;
-    DWORD th = Read<DWORD>(gm + Game::ENTITY_TREE); if (th <= 0x1000) return 0;
-    DWORD root = Read<DWORD>(th + Game::TH_ROOT);
-    std::vector<EntityData> all;
-    std::vector<CorpseData> corpses;
-    TraverseTree(root, all, corpses, g_selfX, g_selfY);
-    for (auto& e : all) {
-        if (e.type == 1 && wcscmp(e.name, name) == 0) {
-            DebugLog("[FOLLOW] Found player '%S' at addr=0x%08X dist=%.1f", name, e.objAddr, e.distance);
-            return e.objAddr;
+    // Read current player stats
+    if (g_playerAddr > 0x1000) {
+        ctx.selfHp = Read<int>(g_playerAddr + Game::ENT_HP);
+        ctx.selfMaxHp = Read<int>(g_playerAddr + Game::ENT_MAX_HP);
+        ctx.selfMana = Read<int>(g_playerAddr + Game::ENT_MANA);
+        ctx.selfMaxMana = Read<int>(g_playerAddr + Game::ENT_MAX_MANA);
+        ctx.selfLevel = Read<int>(g_playerAddr + Game::ENT_LEVEL);
+        ctx.selfClassId = Read<BYTE>(g_playerAddr + Game::ENT_CLASS_IND);
+        DWORD np = Read<DWORD>(g_playerAddr + Game::ENT_NAME_PTR);
+        int nl = Read<int>(g_playerAddr + Game::ENT_NAME_LEN);
+        if (nl > 0 && nl < 64 && np > 0x1000) {
+            wchar_t w[64] = {};
+            for (int i = 0; i < nl; i++) { wchar_t c = Read<wchar_t>(np + i * 2); if (c == 0) break; w[i] = c; }
+            ctx.selfName = w;
         }
     }
-    return 0;
-}
 
-// ============================================================
-// Process listing
-// ============================================================
-void RefreshProcesses() {
-    g_procs.clear();
-    g_listToProc.clear();
-    SendMessageW(g_hProcList,LB_RESETCONTENT,0,0);
-    HANDLE hs=CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0);
-    if(hs==INVALID_HANDLE_VALUE) return;
-    PROCESSENTRY32W pe{}; pe.dwSize=sizeof(pe);
-    if(Process32FirstW(hs,&pe)){do{g_procs.push_back({pe.th32ProcessID,pe.szExeFile});}while(Process32NextW(hs,&pe));}
-    CloseHandle(hs);
-    std::sort(g_procs.begin(),g_procs.end(),[](const ProcInfo& a,const ProcInfo& b){return a.name<b.name;});
-
-    // Separate warspear instances and other processes
-    std::vector<size_t> wsIdx, otherIdx;
-    for(size_t i=0;i<g_procs.size();i++){
-        if(_wcsicmp(g_procs[i].name.c_str(), L"warspear.exe")==0) wsIdx.push_back(i);
-        else otherIdx.push_back(i);
+    // Convert cached entities
+    for (auto& e : g_cachedPlayers) {
+        GameContext::EntityInfo ei;
+        ei.objAddr = e.objAddr; ei.name = e.name;
+        ei.x = e.x; ei.y = e.y; ei.hp = e.hp; ei.maxHp = e.maxHp;
+        ei.distance = e.distance; ei.type = e.type;
+        ctx.players.push_back(ei);
     }
-
-    // Show warspear instances with character names
-    for(size_t idx : wsIdx){
-        g_listToProc.push_back((int)idx);
-        auto& p = g_procs[idx];
-        HANDLE hp = OpenProcess(PROCESS_QUERY_INFORMATION|PROCESS_VM_READ, FALSE, p.pid);
-        std::wstring charName = L"(loading...)";
-        int level = 0, classId = 0;
-        if(hp){
-            float x,y; int hpVal,mhp,mn,mmn;
-            std::vector<EntityData> ents, mobs, npcs;
-            std::vector<CorpseData> corpses;
-            DWORD pAddr=0, gmAddr=0;
-            // Save/restore globals temporarily
-            DWORD savedPid = g_gamePid;
-            HANDLE savedH = g_hProcess;
-            g_gamePid = p.pid;
-            g_hProcess = hp;
-            if(!ReadGameState(x,y,hpVal,mhp,mn,mmn,charName,level,classId,ents,mobs,npcs,corpses,&pAddr,&gmAddr)){
-                charName = L"(not loaded)";
-            }
-            g_gamePid = savedPid;
-            g_hProcess = savedH;
-            CloseHandle(hp);
-        }
-        wchar_t buf[256];
-        if(charName != L"(loading...)" && charName != L"(not loaded)"){
-            const wchar_t* cls = GetClassName(classId);
-            swprintf_s(buf, L"%s [Lv.%d %s]  (PID %d)", charName.c_str(), level, cls, p.pid);
-        } else {
-            swprintf_s(buf, L"%s  (PID %d)", charName.c_str(), p.pid);
-        }
-        SendMessageW(g_hProcList, LB_ADDSTRING, 0, (LPARAM)buf);
+    for (auto& e : g_cachedMobs) {
+        GameContext::EntityInfo ei;
+        ei.objAddr = e.objAddr; ei.name = e.name;
+        ei.x = e.x; ei.y = e.y; ei.hp = e.hp; ei.maxHp = e.maxHp;
+        ei.distance = e.distance; ei.type = e.type;
+        ctx.mobs.push_back(ei);
     }
-
-    // Separator
-    if(!wsIdx.empty() && !otherIdx.empty()){
-        g_listToProc.push_back(-1); // separator
-        SendMessageW(g_hProcList, LB_ADDSTRING, 0, (LPARAM)L"--- other processes ---");
+    for (auto& e : g_cachedNpcs) {
+        GameContext::EntityInfo ei;
+        ei.objAddr = e.objAddr; ei.name = e.name;
+        ei.x = e.x; ei.y = e.y; ei.hp = e.hp; ei.maxHp = e.maxHp;
+        ei.distance = e.distance; ei.type = e.type;
+        ctx.npcs.push_back(ei);
     }
-
-    // Show other processes
-    for(size_t idx : otherIdx){
-        g_listToProc.push_back((int)idx);
-        auto& p = g_procs[idx];
-        wchar_t buf[256]; swprintf_s(buf,L"%s  (PID %d)",p.name.c_str(),p.pid);
-        SendMessageW(g_hProcList,LB_ADDSTRING,0,(LPARAM)buf);
+    for (auto& c : g_cachedCorpses) {
+        GameContext::CorpseInfo ci;
+        ci.objAddr = c.objAddr; ci.name = c.name;
+        ci.x = c.x; ci.y = c.y; ci.distance = c.distance;
+        ctx.corpses.push_back(ci);
     }
+    return ctx;
 }
 
 // ============================================================
-// UI Helpers
-// ============================================================
-void InitFont() { g_hFont=CreateFontW(-11,0,0,0,FW_NORMAL,0,0,0,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH|FF_SWISS,L"Segoe UI"); }
-void SetFont(HWND h){SendMessageW(h,WM_SETFONT,(WPARAM)g_hFont,TRUE);}
-HWND MkL(HWND p,const wchar_t*t,int x,int y,int w,int h){HWND hw=CreateWindowW(L"static",t,WS_CHILD|WS_VISIBLE,x,y,w,h,p,0,g_hInst,0);SetFont(hw);return hw;}
-HWND MkE(HWND p,const wchar_t*d,int x,int y,int w,int h,DWORD ext=0){HWND hw=CreateWindowW(L"edit",d,WS_CHILD|WS_VISIBLE|WS_BORDER|ES_AUTOHSCROLL|ext,x,y,w,h,p,0,g_hInst,0);SetFont(hw);return hw;}
-HWND MkB(HWND p,const wchar_t*t,int x,int y,int w,int h,int id){HWND hw=CreateWindowW(L"button",t,WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,x,y,w,h,p,(HMENU)(intptr_t)id,g_hInst,0);SetFont(hw);return hw;}
-HWND MkC(HWND p,const wchar_t*t,int x,int y,int w,int id){HWND hw=CreateWindowW(L"button",t,WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX,x,y,w,22,p,(HMENU)(intptr_t)id,g_hInst,0);SetFont(hw);return hw;}
-HWND MkLst(HWND p,int x,int y,int w,int h){HWND hw=CreateWindowW(L"listbox",L"",WS_CHILD|WS_VISIBLE|WS_BORDER|WS_VSCROLL|LBS_NOTIFY|LBS_HASSTRINGS,x,y,w,h,p,0,g_hInst,0);SetFont(hw);return hw;}
-
-// ============================================================
-// Create controls once
-// ============================================================
-void HideTabContent() {
-    HWND all[]={g_hDllLabel,g_hDllPath,g_hBtnBrowse,g_hBtnRefresh,g_hBtnConnect,g_hBtnInjectDll,g_hProcList,
-        g_hChkAttack,g_hChkHeal,g_hChkFollow,g_hChkLoot,g_hHealLabel,g_hHealThreshold,g_hHealPct,
-        g_hAtkNameLabel,g_hAtkName,
-        g_hFollowTitle,g_hFollowName,g_hFollowDist,g_hBtnFollowClear,g_hPlayerList,
-        g_hTargetTitle,g_hTargetName,g_hTargetHP,g_hBtnTargetClear,g_hMobList,g_hNpcList};
-    for(HWND h:all) if(h) ShowWindow(h,SW_HIDE);
-}
-
-void CreateAllControls(HWND p) {
-    int x=20,y=48,w=555;
-    // Tab 0: Connection
-    g_hDllLabel=MkL(p,L"DLL:",x,y+2,30,18);
-    g_hDllPath=MkE(p,L"",x+32,y,230,22);
-    g_hBtnBrowse=MkB(p,L"...",x+265,y,30,22,1003);
-    g_hBtnConnect=MkB(p,L"CONNECT",x+298,y,70,22,1002);
-    g_hBtnRefresh=MkB(p,L"Refresh",x+371,y,58,22,1001);
-    g_hBtnInjectDll=MkB(p,L"Inject DLL",x+432,y,70,22,1004);
-    g_hProcList=MkLst(p,x,y+28,w,334);
-    // Tab 1: Bot
-    g_hChkAttack=MkC(p,L"[F1] Auto Attack - attack nearest mob",x,y,400,2001);
-    g_hAtkNameLabel=MkL(p,L"Mob name:",x+25,y+28,65,20);
-    g_hAtkName=MkE(p,L"",x+95,y+25,160,22);
-    g_hChkLoot=MkC(p,L"[F4] Auto Loot - pick up corpses",x,y+52,400,2005);
-    g_hChkHeal=MkC(p,L"[F2] Auto Heal - heal when HP low",x,y+78,400,2002);
-    g_hHealLabel=MkL(p,L"Heal below:",x+25,y+106,80,20);
-    g_hHealThreshold=MkE(p,L"60",x+110,y+103,45,24,ES_NUMBER);
-    g_hHealPct=MkL(p,L"%",x+158,y+106,15,20);
-    g_hChkFollow=MkC(p,L"[F3] Follow Player",x,y+134,400,2004);
-    // Tab 2: Players
-    g_hFollowTitle=MkL(p,L"FOLLOW TARGET:",x,y,200,20);
-    g_hFollowName=MkL(p,L"(double-click a player to follow)",x,y+20,400,20);
-    g_hFollowDist=MkL(p,L"",x,y+40,400,20);
-    g_hBtnFollowClear=MkB(p,L"Stop Follow",x+420,y+18,90,22,3002);
-    g_hPlayerList=MkLst(p,x,y+68,w,272);
-    // Tab 3: Mobs
-    g_hTargetTitle=MkL(p,L"SELECTED TARGET:",x,y,200,20);
-    g_hTargetName=MkL(p,L"(double-click a mob to select)",x,y+20,400,20);
-    g_hTargetHP=MkL(p,L"",x,y+40,400,20);
-    g_hBtnTargetClear=MkB(p,L"Clear Target",x+420,y+18,90,22,3001);
-    g_hMobList=MkLst(p,x,y+68,w,272);
-    // Tab 4: NPCs
-    g_hNpcList=MkLst(p,x,y,w,340);
-    HideTabContent();
-}
-
-void ShowTab(int idx) {
-    HideTabContent();
-    HWND t0[]={g_hDllLabel,g_hDllPath,g_hBtnBrowse,g_hBtnRefresh,g_hBtnConnect,g_hBtnInjectDll,g_hProcList};
-    HWND t1[]={g_hChkAttack,g_hAtkNameLabel,g_hAtkName,g_hChkLoot,g_hChkHeal,g_hHealLabel,g_hHealThreshold,g_hHealPct,g_hChkFollow};
-    HWND t2[]={g_hFollowTitle,g_hFollowName,g_hFollowDist,g_hBtnFollowClear,g_hPlayerList};
-    HWND t3[]={g_hTargetTitle,g_hTargetName,g_hTargetHP,g_hBtnTargetClear,g_hMobList};
-    HWND t4[]={g_hNpcList};
-    HWND* sets[]={t0,t1,t2,t3,t4}; int cnt[]={7,9,5,5,1};
-    for(int i=0;i<cnt[idx];i++) ShowWindow(sets[idx][i],SW_SHOW);
-    if(idx==0) RefreshProcesses();
-}
-
-// ============================================================
-// Inject DLL (optional)
+// DLL injection
 // ============================================================
 bool InjectDLL(DWORD pid, const wchar_t* path) {
     HANDLE hp=OpenProcess(PROCESS_ALL_ACCESS,FALSE,pid);
@@ -833,844 +534,603 @@ bool InjectDLL(DWORD pid, const wchar_t* path) {
 }
 
 // ============================================================
+// Process listing
+// ============================================================
+void RefreshProcesses(HWND hList) {
+    g_procs.clear();
+    g_listToProc.clear();
+    SendMessageW(hList,LB_RESETCONTENT,0,0);
+    HANDLE hs=CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0);
+    if(hs==INVALID_HANDLE_VALUE) return;
+    PROCESSENTRY32W pe{}; pe.dwSize=sizeof(pe);
+    if(Process32FirstW(hs,&pe)){do{g_procs.push_back({pe.th32ProcessID,pe.szExeFile});}while(Process32NextW(hs,&pe));}
+    CloseHandle(hs);
+    std::sort(g_procs.begin(),g_procs.end(),[](const ProcInfo& a,const ProcInfo& b){return a.name<b.name;});
+
+    std::vector<size_t> wsIdx, otherIdx;
+    for(size_t i=0;i<g_procs.size();i++){
+        if(_wcsicmp(g_procs[i].name.c_str(), L"warspear.exe")==0) wsIdx.push_back(i);
+        else otherIdx.push_back(i);
+    }
+
+    for(size_t idx : wsIdx){
+        g_listToProc.push_back((int)idx);
+        auto& p = g_procs[idx];
+        HANDLE hp = OpenProcess(PROCESS_QUERY_INFORMATION|PROCESS_VM_READ, FALSE, p.pid);
+        std::wstring charName = L"(loading...)";
+        int level = 0, classId = 0;
+        if(hp){
+            float x,y; int hpVal,mhp,mn,mmn;
+            std::vector<EntityData> ents, mobs, npcs;
+            std::vector<CorpseData> corpses;
+            DWORD pAddr=0, gmAddr=0;
+            DWORD savedPid = g_gamePid; HANDLE savedH = g_hProcess;
+            g_gamePid = p.pid; g_hProcess = hp;
+            if(!ReadGameState(x,y,hpVal,mhp,mn,mmn,charName,level,classId,ents,mobs,npcs,corpses,&pAddr,&gmAddr))
+                charName = L"(not loaded)";
+            g_gamePid = savedPid; g_hProcess = savedH;
+            CloseHandle(hp);
+        }
+        wchar_t buf[256];
+        if(charName != L"(loading...)" && charName != L"(not loaded)")
+            swprintf_s(buf, L"%s [Lv.%d %s]  (PID %d)", charName.c_str(), level, GetClassName(classId), p.pid);
+        else
+            swprintf_s(buf, L"%s  (PID %d)", charName.c_str(), p.pid);
+        SendMessageW(hList, LB_ADDSTRING, 0, (LPARAM)buf);
+    }
+
+    if(!wsIdx.empty() && !otherIdx.empty()){
+        g_listToProc.push_back(-1);
+        SendMessageW(hList, LB_ADDSTRING, 0, (LPARAM)L"--- other processes ---");
+    }
+    for(size_t idx : otherIdx){
+        g_listToProc.push_back((int)idx);
+        auto& p = g_procs[idx];
+        wchar_t buf[256]; swprintf_s(buf,L"%s  (PID %d)",p.name.c_str(),p.pid);
+        SendMessageW(hList,LB_ADDSTRING,0,(LPARAM)buf);
+    }
+}
+
+// ============================================================
+// UI Helpers
+// ============================================================
+HFONT g_hFont = NULL;
+void InitFont() { g_hFont=CreateFontW(-11,0,0,0,FW_NORMAL,0,0,0,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH|FF_SWISS,L"Segoe UI"); }
+void SetFont(HWND h){SendMessageW(h,WM_SETFONT,(WPARAM)g_hFont,TRUE);}
+
+// ============================================================
+// UI Layout constants
+// ============================================================
+static const int UI_MENU_H    = 24;
+static const int UI_STATUS_H  = 22;
+static const int UI_TREE_W    = 180;
+static const int UI_DETAIL_X  = UI_TREE_W + 15;
+static const int UI_DETAIL_W  = 390;
+static const int UI_DETAIL_H  = 360;
+static const int UI_TREE_Y    = UI_MENU_H + 5;
+static const int UI_DETAIL_Y  = UI_MENU_H + 5;
+
+// ============================================================
+// Process list panel (for Connection tab)
+// ============================================================
+static HWND g_hProcList = NULL;
+static HWND g_hBtnConnect = NULL;
+static HWND g_hBtnRefresh = NULL;
+static HWND g_hDllPath = NULL;
+static HWND g_hBtnBrowse = NULL;
+static HWND g_hBtnInject = NULL;
+static HWND g_hProcPanel = NULL;
+
+void CreateProcessPanel(HWND parent) {
+    g_hProcPanel = CreateWindowExW(0, L"STATIC", L"",
+        WS_CHILD|WS_VISIBLE, UI_DETAIL_X, UI_DETAIL_Y, UI_DETAIL_W, UI_DETAIL_H,
+        parent, NULL, g_hInst, NULL);
+
+    int x = 10, y = 5;
+    CreateWindowExW(0, L"static", L"Processes:", WS_CHILD|WS_VISIBLE,
+        x, y, 200, 18, g_hProcPanel, NULL, g_hInst, NULL);
+    y += 20;
+    g_hProcList = CreateWindowExW(0, L"listbox", L"",
+        WS_CHILD|WS_VISIBLE|WS_BORDER|WS_VSCROLL|LBS_NOTIFY,
+        x, y, 370, 200, g_hProcPanel, NULL, g_hInst, NULL);
+    SetFont(g_hProcList);
+
+    y += 208;
+    g_hBtnRefresh = CreateWindowExW(0, L"button", L"Refresh",
+        WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
+        x, y, 70, 24, g_hProcPanel, (HMENU)IDM_REFRESH, g_hInst, NULL);
+    g_hBtnConnect = CreateWindowExW(0, L"button", L"Connect",
+        WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
+        x+75, y, 70, 24, g_hProcPanel, (HMENU)IDM_CONNECT, g_hInst, NULL);
+
+    y += 32;
+    CreateWindowExW(0, L"static", L"DLL:", WS_CHILD|WS_VISIBLE,
+        x, y+2, 30, 18, g_hProcPanel, NULL, g_hInst, NULL);
+    g_hDllPath = CreateWindowExW(0, L"edit", L"",
+        WS_CHILD|WS_VISIBLE|WS_BORDER|ES_AUTOHSCROLL,
+        x+32, y, 220, 22, g_hProcPanel, NULL, g_hInst, NULL);
+    g_hBtnBrowse = CreateWindowExW(0, L"button", L"...",
+        WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
+        x+255, y, 30, 22, g_hProcPanel, (HMENU)IDM_BROWSE_DLL, g_hInst, NULL);
+    g_hBtnInject = CreateWindowExW(0, L"button", L"Inject DLL",
+        WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
+        x+290, y, 70, 22, g_hProcPanel, (HMENU)IDM_INJECT, g_hInst, NULL);
+
+    SetFont(g_hBtnRefresh); SetFont(g_hBtnConnect);
+    SetFont(g_hDllPath); SetFont(g_hBtnBrowse); SetFont(g_hBtnInject);
+}
+
+// ============================================================
+// Detail panel for active module
+// ============================================================
+static HWND g_hDetailLabel = NULL;
+
+void CreateDetailPanel(HWND parent) {
+    g_hDetailPanel = CreateWindowExW(0, L"STATIC", L"",
+        WS_CHILD, UI_DETAIL_X, UI_DETAIL_Y, UI_DETAIL_W, UI_DETAIL_H,
+        parent, NULL, g_hInst, NULL);
+    g_hDetailLabel = CreateWindowExW(0, L"static", L"Select a module from the tree",
+        WS_CHILD|WS_VISIBLE, 10, 10, 370, 20,
+        g_hDetailPanel, NULL, g_hInst, NULL);
+    SetFont(g_hDetailLabel);
+}
+
+void ShowModuleUI(IModule* mod) {
+    // Hide process panel
+    if (g_hProcPanel) ShowWindow(g_hProcPanel, SW_HIDE);
+
+    // Destroy old module UI children
+    if (g_hDetailPanel) {
+        // Kill all child windows of detail panel
+        HWND child = GetWindow(g_hDetailPanel, GW_CHILD);
+        while (child) {
+            HWND next = GetWindow(child, GW_HWNDNEXT);
+            DestroyWindow(child);
+            child = next;
+        }
+    }
+
+    g_activeModule = mod;
+
+    if (!mod || !mod->HasUI()) {
+        if (g_hDetailPanel) {
+            ShowWindow(g_hDetailPanel, SW_SHOW);
+            const wchar_t* msg = mod ? mod->GetName() : L"Select a module from the tree";
+            g_hDetailLabel = CreateWindowExW(0, L"static", msg,
+                WS_CHILD|WS_VISIBLE, 10, 10, 370, 20,
+                g_hDetailPanel, NULL, g_hInst, NULL);
+            SetFont(g_hDetailLabel);
+        }
+        return;
+    }
+
+    ShowWindow(g_hDetailPanel, SW_SHOW);
+    mod->CreateUI(g_hDetailPanel, 10, 30, 370);
+}
+
+void ShowProcessPanel() {
+    if (g_hDetailPanel) ShowWindow(g_hDetailPanel, SW_HIDE);
+    if (g_hProcPanel) {
+        ShowWindow(g_hProcPanel, SW_SHOW);
+        RefreshProcesses(g_hProcList);
+    }
+    g_activeModule = nullptr;
+}
+
+// ============================================================
+// Menu bar
+// ============================================================
+void CreateMenuBar(HWND hWnd) {
+    HMENU hMenuBar = CreateMenu();
+    HMENU hConfigMenu = CreatePopupMenu();
+    HMENU hQuickMenu = CreatePopupMenu();
+    HMENU hConnMenu = CreatePopupMenu();
+
+    AppendMenuW(hMenuBar, MF_POPUP, (UINT_PTR)hConfigMenu, L"Config");
+    AppendMenuW(hConfigMenu, MF_STRING, IDM_REFRESH, L"Refresh Processes");
+    AppendMenuW(hConfigMenu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(hConfigMenu, MF_STRING, IDM_EXIT, L"Exit");
+
+    AppendMenuW(hMenuBar, MF_POPUP, (UINT_PTR)hQuickMenu, L"Quick Actions");
+    AppendMenuW(hQuickMenu, MF_STRING, IDM_TOGGLE_ATTACK, L"Toggle Attack [F1]");
+    AppendMenuW(hQuickMenu, MF_STRING, IDM_TOGGLE_HEAL, L"Toggle Heal [F2]");
+    AppendMenuW(hQuickMenu, MF_STRING, IDM_TOGGLE_FOLLOW, L"Toggle Follow [F3]");
+    AppendMenuW(hQuickMenu, MF_STRING, IDM_TOGGLE_LOOT, L"Toggle Loot [F4]");
+    AppendMenuW(hQuickMenu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(hQuickMenu, MF_STRING, IDM_TOGGLE_ALL, L"Toggle All ON");
+    AppendMenuW(hQuickMenu, MF_STRING, IDM_STOP_ALL, L"STOP ALL");
+    AppendMenuW(hQuickMenu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(hQuickMenu, MF_STRING, IDM_SCALE_UP, L"Scale Up [F5]");
+    AppendMenuW(hQuickMenu, MF_STRING, IDM_SCALE_DOWN, L"Scale Down [F6]");
+
+    AppendMenuW(hMenuBar, MF_POPUP, (UINT_PTR)hConnMenu, L"Connection");
+    AppendMenuW(hConnMenu, MF_STRING, IDM_CONNECT, L"Connect to Process");
+    AppendMenuW(hConnMenu, MF_STRING, IDM_INJECT, L"Inject DLL");
+    AppendMenuW(hConnMenu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(hConnMenu, MF_STRING, IDM_DEBUG, L"Debug Console");
+
+    SetMenu(hWnd, hMenuBar);
+    g_hMenu = hMenuBar;
+}
+
+// ============================================================
+// TreeView for module selection
+// ============================================================
+void CreateModuleTree(HWND parent) {
+    g_hTreeView = CreateWindowExW(WS_EX_CLIENTEDGE, WC_TABCONTROLW, L"",
+        WS_CHILD|WS_VISIBLE|TVS_HASLINES|TVS_HASBUTTONS|TVS_LINESATROOT|TVS_SHOWSELALWAYS,
+        5, UI_TREE_Y, UI_TREE_W, UI_DETAIL_H,
+        parent, NULL, g_hInst, NULL);
+
+    // Actually use a TreeView control
+    g_hTreeView = CreateWindowExW(WS_EX_CLIENTEDGE, WC_TREEVIEWW, L"",
+        WS_CHILD|WS_VISIBLE|TVS_HASLINES|TVS_HASBUTTONS|TVS_LINESATROOT|TVS_SHOWSELALWAYS,
+        5, UI_TREE_Y, UI_TREE_W, UI_DETAIL_H,
+        parent, (HMENU)2000, g_hInst, NULL);
+
+    SetFont(g_hTreeView);
+
+    // Register modules
+    g_modMgr.Add(&g_targeter);
+    g_modMgr.Add(&g_attacker);
+    g_modMgr.Add(&g_healer);
+    g_modMgr.Add(&g_partyHealer);
+    g_modMgr.Add(&g_looter);
+    g_modMgr.Add(&g_follower);
+    g_modMgr.Add(&g_extra);
+
+    // Load configs
+    wchar_t cfgDir[MAX_PATH];
+    GetModuleFileNameW(NULL, cfgDir, MAX_PATH);
+    wchar_t* bs = wcsrchr(cfgDir, L'\\'); if (bs) *bs = 0;
+    wcscat_s(cfgDir, L"\\config");
+    g_modMgr.LoadAll(cfgDir);
+
+    // Build tree
+    g_modMgr.BuildTreeView(g_hTreeView);
+
+    // Add connection item
+    TVINSERTSTRUCTW tis{};
+    tis.hParent = TVI_ROOT;
+    tis.hInsertAfter = TVI_FIRST;
+    tis.item.mask = TVIF_TEXT | TVIF_PARAM;
+    tis.item.pszText = L"Connection";
+    tis.item.lParam = -1; // sentinel for connection
+    TreeView_InsertItem(g_hTreeView, &tis);
+}
+
+// ============================================================
 // Update UI
 // ============================================================
 void UpdateUI() {
-    if(!g_connected||!g_hProcess) {
-        SetWindowTextW(g_hStatus,g_hProcess?L"  Connected (memory read OK)":L"  Select Warspear and click CONNECT");
+    if (!g_connected || !g_hProcess) {
+        SetWindowTextW(g_hStatus, g_hProcess ? L"  Connected" : L"  Select Warspear and connect");
         return;
     }
     float sx,sy; int hp,mhp,mn,mmn; std::wstring name; int level=0, classId=0;
     std::vector<EntityData> pl,mb,np;
     std::vector<CorpseData> corpses;
     DWORD playerAddr=0, gmAddr=0;
-    if(!ReadGameState(sx,sy,hp,mhp,mn,mmn,name,level,classId,pl,mb,np,corpses,&playerAddr,&gmAddr)){
-        SetWindowTextW(g_hStatus,L"  Cannot read game memory"); g_connected=false; return;
+    if (!ReadGameState(sx,sy,hp,mhp,mn,mmn,name,level,classId,pl,mb,np,corpses,&playerAddr,&gmAddr)) {
+        SetWindowTextW(g_hStatus, L"  Cannot read game memory");
+        g_connected = false;
+        return;
     }
-    g_selfX=sx; g_selfY=sy;
-    g_cachedCorpses=corpses;
+    g_selfX = sx; g_selfY = sy;
+    g_cachedCorpses = corpses;
+    g_cachedPlayers = pl;
+    g_cachedMobs = mb;
+    g_cachedNpcs = np;
+    g_playerAddr = playerAddr;
+    g_gmAddr = gmAddr;
 
-    // Update window title with character info (for multi-instance identification)
+    wchar_t buf[512];
+    swprintf_s(buf, L"  %s | Lv.%d %s | HP: %d/%d | Players: %d Mobs: %d NPCs: %d",
+        name.c_str(), level, GetClassName(classId), hp, mhp, (int)pl.size(), (int)mb.size(), (int)np.size());
+    SetWindowTextW(g_hStatus, buf);
+
+    // Update window title
     static std::wstring lastCharName;
-    if(name != lastCharName) {
+    if (name != lastCharName) {
         wchar_t wtitle[128];
         swprintf_s(wtitle, L"WS-Bot - %s [Lv.%d %s]", name.c_str(), level, GetClassName(classId));
         SetWindowTextW(g_hWnd, wtitle);
         lastCharName = name;
     }
 
-    wchar_t buf[512];
-    if(g_killCount>0 || g_lootCount>0) {
-        swprintf_s(buf,L"  %s | Lv.%d %s | HP: %d/%d | Kills: %d | Loots: %d | Corpses: %d",
-            name.c_str(),level,GetClassName(classId),hp,mhp,g_killCount,g_lootCount,(int)corpses.size());
-    } else {
-        swprintf_s(buf,L"  %s  |  Lv.%d %s  |  HP: %d/%d  |  Mana: %d/%d  |  Players: %d  Mobs: %d  NPCs: %d  Corpses: %d",
-            name.c_str(),level,GetClassName(classId),hp,mhp,mn,mmn,(int)pl.size(),(int)mb.size(),(int)np.size(),(int)corpses.size());
+    // Tick all modules
+    GameContext ctx = BuildContext();
+    // Sync Targeter selection to Attacker target
+    if (g_targeter.enabled && g_targeter.selectedAddr > 0x1000) {
+        g_attacker.targetAddr = g_targeter.selectedAddr;
     }
-    SetWindowTextW(g_hStatus,buf);
+    g_modMgr.TickAll(ctx);
 
-    g_cachedPlayers=pl;
-    static std::vector<EntityData> prevPlayers;
-    bool playersChanged = (pl.size() != prevPlayers.size());
-    if (!playersChanged) {
-        for (size_t i = 0; i < pl.size(); i++) {
-            if (pl[i].objAddr != prevPlayers[i].objAddr || pl[i].hp != prevPlayers[i].hp) {
-                playersChanged = true; break;
-            }
-        }
-    }
-    if (playersChanged) {
-        SendMessageW(g_hPlayerList,LB_RESETCONTENT,0,0);
-        if(pl.empty()) SendMessageW(g_hPlayerList,LB_ADDSTRING,0,(LPARAM)L"(no players nearby)");
-        for(auto& p:pl){
-            wchar_t pfx[8]={}; if(g_followTargetAddr>0x1000&&p.objAddr==g_followTargetAddr) wcscpy_s(pfx,L"[>] ");
-            swprintf_s(buf,L"%s%-20s  HP: %d/%d  Dist: %.1f",pfx,p.name,p.hp,p.maxHp,p.distance);
-            SendMessageW(g_hPlayerList,LB_ADDSTRING,0,(LPARAM)buf);
-        }
-        prevPlayers = pl;
-    }
+    // Refresh tree labels
+    g_modMgr.RefreshTreeViewLabels(g_hTreeView);
 
-    if(g_followTargetAddr>0x1000){
-        bool f=false;
-        for(auto&p:pl){if(p.objAddr==g_followTargetAddr){
-            swprintf_s(buf,L"%s  (0x%X)",p.name,p.objAddr); SetWindowTextW(g_hFollowName,buf);
-            swprintf_s(buf,L"Dist: %.1f  |  HP: %d/%d",p.distance,p.hp,p.maxHp); SetWindowTextW(g_hFollowDist,buf);
-            f=true;break;}}
-        if(!f){
-            if(g_followPaused){SetWindowTextW(g_hFollowName,L"(searching - zone change)");SetWindowTextW(g_hFollowDist,L"");}
-            else{SetWindowTextW(g_hFollowName,L"(player left area)");SetWindowTextW(g_hFollowDist,L"");}
-        }
-    } else if(g_followPaused && g_followName[0]!=0){
-        swprintf_s(buf,L"%s  (searching...)",g_followName); SetWindowTextW(g_hFollowName,buf);
-        SetWindowTextW(g_hFollowDist,L"");
-    }
-
-    g_cachedMobs=mb;
-
-    // Periodic stats summary every 30 seconds
-    static int statsTimer=0;
-    statsTimer++;
-    if(statsTimer >= 60 && (g_killCount > 0 || g_lootCount > 0)) {
-        statsTimer = 0;
-        DWORD elapsed = (GetTickCount() - g_lastLootTime) / 1000;
-        DebugLog("[STATS] ====================================");
-        DebugLog("[STATS] Kills: %d  |  Loots: %d  |  Ratio: %s",
-            g_killCount, g_lootCount,
-            g_killCount > 0 ? "" : "N/A");
-        DebugLog("[STATS] Last loot: '%S' (%d sec ago)", g_lastLootName, elapsed);
-        DebugLog("[STATS] Corpses nearby: %d", (int)corpses.size());
-        DebugLog("[STATS] ====================================");
-    }
-    // Only rebuild mob list if data changed
-    static std::vector<EntityData> prevMobs;
-    bool mobsChanged = (mb.size() != prevMobs.size());
-    if (!mobsChanged) {
-        for (size_t i = 0; i < mb.size(); i++) {
-            if (mb[i].objAddr != prevMobs[i].objAddr || mb[i].hp != prevMobs[i].hp || mb[i].maxHp != prevMobs[i].maxHp) {
-                mobsChanged = true; break;
-            }
-        }
-    }
-    if (mobsChanged) {
-        int prevSel = (int)SendMessageW(g_hMobList, LB_GETCURSEL, 0, 0);
-        DWORD prevSelAddr = 0;
-        if (prevSel != LB_ERR && prevSel < (int)prevMobs.size()) prevSelAddr = prevMobs[prevSel].objAddr;
-        SendMessageW(g_hMobList,LB_RESETCONTENT,0,0);
-        if(mb.empty()) SendMessageW(g_hMobList,LB_ADDSTRING,0,(LPARAM)L"(no mobs nearby)");
-        int newSel = 0;
-        for(size_t i=0;i<mb.size();i++){
-            auto&m=mb[i];
-            wchar_t pfx[8]={}; if(g_selectedTargetAddr>0x1000&&m.objAddr==g_selectedTargetAddr) wcscpy_s(pfx,L"[>] ");
-            swprintf_s(buf,L"%s%-20s  HP: %d/%d  Dist: %.1f%s",pfx,m.name,m.hp,m.maxHp,m.distance,m.hp<=0?L" [DEAD]":L"");
-            SendMessageW(g_hMobList,LB_ADDSTRING,0,(LPARAM)buf);
-            if (prevSelAddr > 0x1000 && m.objAddr == prevSelAddr) newSel = (int)i;
-        }
-        if (prevSel != LB_ERR) SendMessageW(g_hMobList, LB_SETCURSEL, newSel, 0);
-        prevMobs = mb;
-
-        // Death detection: mobs that disappeared from tree = likely killed manually
-        if(!g_prevMobs.empty()) {
-            for(auto& prev : g_prevMobs) {
-                if(prev.hp <= 0) continue;
-                bool stillAlive = false;
-                for(auto& cur : mb) {
-                    if(cur.objAddr == prev.objAddr) { stillAlive = true; break; }
-                }
-                if(!stillAlive) {
-                    g_killCount++;
-                    DebugLog("[DEATH] Mob died: '%S' HP=%d/%d (%.1f,%.1f) Kills=%d",
-                        prev.name, prev.hp, prev.maxHp, prev.x, prev.y, g_killCount);
-                    if(g_autoLoot && !g_hasPendingCorpse) {
-                        g_pendingCorpseX = prev.x;
-                        g_pendingCorpseY = prev.y;
-                        g_pendingCorpseAddr = prev.objAddr;
-                        wcscpy_s(g_pendingCorpseName, prev.name);
-                        g_pendingCorpseTime = GetTickCount();
-                        g_hasPendingCorpse = true;
-                        DebugLog("[LOOT] Saved corpse: '%S' addr=0x%08X (%.1f,%.1f)", prev.name, g_pendingCorpseAddr, prev.x, prev.y);
-                    }
-                }
-            }
-        }
-        g_prevMobs = mb;
-    }
-
-    if(g_selectedTargetAddr>0x1000){
-        bool f=false;
-        for(auto&m:mb){if(m.objAddr==g_selectedTargetAddr){
-            swprintf_s(buf,L"%s  (0x%X)",m.name,m.objAddr); SetWindowTextW(g_hTargetName,buf);
-            int pct=m.maxHp>0?(m.hp*100)/m.maxHp:0;
-            swprintf_s(buf,L"HP: %d / %d  (%d%%)",m.hp,m.maxHp,pct); SetWindowTextW(g_hTargetHP,buf);
-            f=true;break;}}
-        if(!f){SetWindowTextW(g_hTargetName,L"(target lost)");SetWindowTextW(g_hTargetHP,L"");}
-    }
-
-    static std::vector<EntityData> prevNpcs;
-    bool npcsChanged = (np.size() != prevNpcs.size());
-    if (!npcsChanged) {
-        for (size_t i = 0; i < np.size(); i++) {
-            if (np[i].objAddr != prevNpcs[i].objAddr || np[i].hp != prevNpcs[i].hp) {
-                npcsChanged = true; break;
-            }
-        }
-    }
-    if (npcsChanged) {
-        SendMessageW(g_hNpcList,LB_RESETCONTENT,0,0);
-        if(np.empty()) SendMessageW(g_hNpcList,LB_ADDSTRING,0,(LPARAM)L"(no NPCs nearby)");
-        for(auto&n:np){swprintf_s(buf,L"%-20s  HP: %d/%d  Dist: %.1f",n.name,n.hp,n.maxHp,n.distance);SendMessageW(g_hNpcList,LB_ADDSTRING,0,(LPARAM)buf);}
-        prevNpcs = np;
-    }
+    // Update active module UI
+    if (g_activeModule) g_activeModule->UpdateUI();
 }
 
 // ============================================================
 // WndProc
 // ============================================================
-LRESULT CALLBACK WndProc(HWND hWnd,UINT msg,WPARAM wParam,LPARAM lParam) {
-    switch(msg) {
+LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
     case WM_CREATE: {
         InitFont();
-        g_hTab=CreateWindowW(WC_TABCONTROLW,L"",WS_CHILD|WS_VISIBLE|WS_CLIPSIBLINGS,10,10,575,420,hWnd,0,g_hInst,0);
-        SetFont(g_hTab);
-        TCITEMW tie{}; tie.mask=TCIF_TEXT;
-        const wchar_t* tabs[]={L"Connection",L"Bot",L"Players",L"Mobs",L"NPCs"};
-        for(int i=0;i<5;i++){tie.pszText=(LPWSTR)tabs[i];TabCtrl_InsertItem(g_hTab,i,&tie);}
-        g_hStatus=CreateWindowW(STATUSCLASSNAMEW,L"",WS_CHILD|WS_VISIBLE|SBARS_SIZEGRIP,0,0,0,0,hWnd,0,g_hInst,0);
-        SendMessageW(g_hStatus,WM_SETFONT,(WPARAM)g_hFont,TRUE);
-        CreateAllControls(hWnd);
-        ShowTab(0);
+        CreateMenuBar(hWnd);
+        g_hStatus = CreateWindowExW(0, STATUSCLASSNAMEW, L"",
+            WS_CHILD|WS_VISIBLE|SBARS_SIZEGRIP, 0, 0, 0, 0, hWnd, NULL, g_hInst, NULL);
+        SendMessageW(g_hStatus, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+        CreateModuleTree(hWnd);
+        CreateDetailPanel(hWnd);
+        CreateProcessPanel(hWnd);
+        ShowProcessPanel();
         break;
     }
-    case WM_NOTIFY:
-        if(((NMHDR*)lParam)->hwndFrom==g_hTab&&((NMHDR*)lParam)->code==TCN_SELCHANGE)
-            ShowTab(TabCtrl_GetCurSel(g_hTab));
+
+    case WM_NOTIFY: {
+        NMHDR* nm = (NMHDR*)lParam;
+        if (nm->hwndFrom == g_hTreeView && nm->code == TVN_SELCHANGEDW) {
+            NMTREEVIEWW* nmtv = (NMTREEVIEWW*)lParam;
+            HTREEITEM sel = TreeView_GetSelection(g_hTreeView);
+            if (!sel) break;
+            TVITEMW tvi{};
+            tvi.mask = TVIF_PARAM;
+            tvi.hItem = sel;
+            TreeView_GetItem(g_hTreeView, &tvi);
+
+            if (tvi.lParam == -1) {
+                ShowProcessPanel();
+            } else {
+                IModule* mod = (IModule*)tvi.lParam;
+                ShowModuleUI(mod);
+            }
+        }
         break;
+    }
 
     case WM_COMMAND: {
-        int id=LOWORD(wParam), code=HIWORD(wParam);
+        int id = LOWORD(wParam);
+        int code = HIWORD(wParam);
 
-        // Connect (read memory only, no DLL)
-        if(id==1002) {
-            int sel=(int)SendMessageW(g_hProcList,LB_GETCURSEL,0,0);
-            if(sel==LB_ERR||sel>=(int)g_listToProc.size()){
-                DebugLog("[CONNECT] No process selected");
-                MessageBoxW(hWnd,L"Select a process first!",L"",MB_OK|MB_ICONWARNING); break;
+        // Forward to active module
+        if (g_activeModule && id >= 9000) {
+            g_activeModule->OnCommand(id, code);
+            break;
+        }
+
+        switch (id) {
+        case IDM_REFRESH:
+            if (g_hProcList) RefreshProcesses(g_hProcList);
+            break;
+
+        case IDM_CONNECT: {
+            if (!g_hProcList) break;
+            int sel = (int)SendMessageW(g_hProcList, LB_GETCURSEL, 0, 0);
+            if (sel == LB_ERR || sel >= (int)g_listToProc.size()) {
+                MessageBoxW(hWnd, L"Select a process first!", L"", MB_OK|MB_ICONWARNING);
+                break;
             }
             int procIdx = g_listToProc[sel];
-            if(procIdx < 0 || procIdx >= (int)g_procs.size()){
-                DebugLog("[CONNECT] Invalid selection");
+            if (procIdx < 0 || procIdx >= (int)g_procs.size()) break;
+            DWORD pid = g_procs[procIdx].pid;
+            if (g_hProcess) CloseHandle(g_hProcess);
+            g_hProcess = OpenProcess(PROCESS_QUERY_INFORMATION|PROCESS_VM_READ|PROCESS_VM_WRITE|PROCESS_VM_OPERATION, FALSE, pid);
+            g_gamePid = pid;
+            if (!g_hProcess) {
+                MessageBoxW(hWnd, L"Cannot open process.\nTry running as Administrator.", L"Error", MB_OK|MB_ICONERROR);
                 break;
             }
-            DWORD pid=g_procs[procIdx].pid;
-            DebugLog("[CONNECT] Attempting to connect to PID %d (%S)", pid, g_procs[procIdx].name.c_str());
-            if(g_hProcess) CloseHandle(g_hProcess);
-            g_hProcess=OpenProcess(PROCESS_QUERY_INFORMATION|PROCESS_VM_READ|PROCESS_VM_WRITE|PROCESS_VM_OPERATION,FALSE,pid);
-            g_gamePid=pid;
-            if(!g_hProcess){
-                DebugLog("[CONNECT] FAILED to open process - error %d", GetLastError());
-                MessageBoxW(hWnd,L"Cannot open process.\nTry running as Administrator.",L"Error",MB_OK|MB_ICONERROR);
-                break;
-            }
-            DebugLog("[CONNECT] Process opened, reading game state...");
             float x,y; int hp,mhp,mn,mmn; std::wstring name; int level=0, classId=0;
-            std::vector<EntityData> p,m,n;
-            std::vector<CorpseData> corpses;
-            if(ReadGameState(x,y,hp,mhp,mn,mmn,name,level,classId,p,m,n,corpses)){
-                g_connected=true;
-                DebugLog("[CONNECT] SUCCESS - Character: %S", name.c_str());
-                DebugLog("[CONNECT] Position: (%.1f, %.1f) HP: %d/%d Mana: %d/%d Level: %d Class: %d", x, y, hp, mhp, mn, mmn, level, classId);
-                DebugLog("[CONNECT] Entities: %d players, %d mobs, %d NPCs, %d corpses", (int)p.size(), (int)m.size(), (int)n.size(), (int)corpses.size());
+            std::vector<EntityData> p,m,n; std::vector<CorpseData> corpses;
+            if (ReadGameState(x,y,hp,mhp,mn,mmn,name,level,classId,p,m,n,corpses)) {
+                g_connected = true;
                 OpenDebugConsole(hWnd);
-                // Rename window to character name for multi-instance identification
                 wchar_t wtitle[128];
                 swprintf_s(wtitle, L"WS-Bot - %s [Lv.%d %s]", name.c_str(), level, GetClassName(classId));
                 SetWindowTextW(hWnd, wtitle);
-                // Rename debug console too
-                wchar_t dtitle[128];
-                swprintf_s(dtitle, L"Bot Console - %s", name.c_str());
-                SetConsoleTitleW(dtitle);
-                wchar_t m2[256];
-                swprintf_s(m2,L"Connected to PID %d!\n\nCharacter: %s\nLevel: %d\nClass: %s\nHP: %d/%d\nMana: %d/%d\nPlayers: %d  Mobs: %d  NPCs: %d\nCorpses: %d",
-                    pid,name.c_str(),level,GetClassName(classId),hp,mhp,mn,mmn,(int)p.size(),(int)m.size(),(int)n.size(),(int)corpses.size());
-                MessageBoxW(hWnd,m2,L"Connected!",MB_OK|MB_ICONINFORMATION);
+                DebugLog("[CONNECT] SUCCESS - %S Lv.%d", name.c_str(), level);
+                // Start enabled modules
+                g_modMgr.StartAll();
+                // Auto-select first mob for attacker
+                if (!m.empty()) {
+                    g_attacker.targetAddr = m[0].objAddr;
+                }
+                // Auto-select first player for follower
+                if (!p.empty()) {
+                    g_follower.targetAddr = p[0].objAddr;
+                    g_follower.targetName = p[0].name;
+                }
             } else {
-                DebugLog("[CONNECT] FAILED to read game memory");
-                MessageBoxW(hWnd,L"Process opened but cannot read game memory.\nMake sure game is loaded.",L"Warning",MB_OK|MB_ICONWARNING);
+                MessageBoxW(hWnd, L"Cannot read game memory.", L"Warning", MB_OK|MB_ICONWARNING);
             }
             break;
         }
 
-        // Refresh
-        if(id==1001){RefreshProcesses();break;}
-
-        // Browse DLL
-        if(id==1003) {
+        case IDM_BROWSE_DLL: {
             OPENFILENAMEW ofn{}; wchar_t file[MAX_PATH]={};
             ofn.lStructSize=sizeof(ofn); ofn.hwndOwner=hWnd;
             ofn.lpstrFilter=L"DLL Files (*.dll)\0*.dll\0All Files (*.*)\0*.*\0";
             ofn.lpstrFile=file; ofn.nMaxFile=MAX_PATH;
             ofn.Flags=OFN_FILEMUSTEXIST|OFN_PATHMUSTEXIST;
-            if(GetOpenFileNameW(&ofn)) SetWindowTextW(g_hDllPath,file);
+            if (GetOpenFileNameW(&ofn)) SetWindowTextW(g_hDllPath, file);
             break;
         }
 
-        // Inject DLL
-        if(id==1004) {
-            if(!g_hProcess||!g_connected){
-                DebugLog("[INJECT] Cannot inject - not connected");
-                MessageBoxW(hWnd,L"Connect to the process first!",L"",MB_OK|MB_ICONWARNING); break;
+        case IDM_INJECT: {
+            if (!g_hProcess || !g_connected) {
+                MessageBoxW(hWnd, L"Connect first!", L"", MB_OK|MB_ICONWARNING);
+                break;
             }
-            DebugLog("[INJECT] Creating shared memory...");
-            // Create shared memory for DLL communication
-            if(!g_hSharedMem){
+            if (!g_hSharedMem) {
                 g_hSharedMem = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, sizeof(BotCmd), L"Local\\WarspearBotShared");
-                if(g_hSharedMem) g_pBotCmd = (BotCmd*)MapViewOfFile(g_hSharedMem, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(BotCmd));
+                if (g_hSharedMem) g_pBotCmd = (BotCmd*)MapViewOfFile(g_hSharedMem, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(BotCmd));
             }
-            if(!g_pBotCmd){
-                DebugLog("[INJECT] FAILED to create shared memory");
-                MessageBoxW(hWnd,L"Cannot create shared memory.",L"Error",MB_OK|MB_ICONERROR); break;
+            if (!g_pBotCmd) {
+                MessageBoxW(hWnd, L"Cannot create shared memory.", L"Error", MB_OK|MB_ICONERROR);
+                break;
             }
-            ZeroMemory(g_pBotCmd, sizeof(BotCmd));
-            wchar_t dll[MAX_PATH]; GetWindowTextW(g_hDllPath,dll,MAX_PATH);
-            if(dll[0]==0){
-                DebugLog("[INJECT] No DLL path specified");
-                MessageBoxW(hWnd,L"Enter or browse for a DLL path.",L"",MB_OK|MB_ICONWARNING);break;
+            wchar_t dll[MAX_PATH]; GetWindowTextW(g_hDllPath, dll, MAX_PATH);
+            if (dll[0] == 0) {
+                MessageBoxW(hWnd, L"Enter DLL path.", L"", MB_OK|MB_ICONWARNING);
+                break;
             }
-            if(!wcschr(dll,L':')){
-                wchar_t dir[MAX_PATH]; GetModuleFileNameW(NULL,dir,MAX_PATH);
-                wchar_t* bs=wcsrchr(dir,L'\\'); if(bs)*bs=0;
-                wchar_t full[MAX_PATH]; swprintf_s(full,L"%s\\%s",dir,dll); wcscpy_s(dll,full);
+            if (!wcschr(dll, L':')) {
+                wchar_t dir[MAX_PATH]; GetModuleFileNameW(NULL, dir, MAX_PATH);
+                wchar_t* bs = wcsrchr(dir, L'\\'); if (bs) *bs = 0;
+                wchar_t full[MAX_PATH]; swprintf_s(full, L"%s\\%s", dir, dll);
+                wcscpy_s(dll, full);
             }
-            DebugLog("[INJECT] DLL path: %S", dll);
-            DebugLog("[INJECT] Target PID: %d", g_gamePid);
-            if(InjectDLL(g_gamePid,dll)){
-                g_dllInjected=true;
-                OpenDebugConsole(hWnd);
-                DebugLog("[INJECT] SUCCESS - DLL injected!");
-                DebugLog("[INJECT] Shared memory: attackOn=%d followOn=%d", g_pBotCmd->attackOn, g_pBotCmd->followOn);
-                SetWindowTextW(g_hStatus,L"  DLL injected! Bot active via DLL.");
+            if (InjectDLL(g_gamePid, dll)) {
+                g_dllInjected = true;
+                DebugLog("[INJECT] SUCCESS");
             } else {
-                DebugLog("[INJECT] FAILED - injection error %d", GetLastError());
-                MessageBoxW(hWnd,L"DLL injection failed.",L"Error",MB_OK|MB_ICONERROR);
+                MessageBoxW(hWnd, L"DLL injection failed.", L"Error", MB_OK|MB_ICONERROR);
             }
             break;
         }
 
-        // Mob double-click -> select target AND start attack
-        if((HWND)lParam==g_hMobList&&code==LBN_DBLCLK) {
-            int sel=(int)SendMessageW(g_hMobList,LB_GETCURSEL,0,0);
-            if(sel!=LB_ERR&&sel>=0&&sel<(int)g_cachedMobs.size()){
-                auto&m=g_cachedMobs[sel];
-                if(m.hp>0){
-                    g_selectedTargetAddr=m.objAddr; wcscpy_s(g_selTargetName,m.name);
-                    DebugLog("[TARGET] Selected: %S (0x%08X) HP=%d/%d Dist=%.1f", m.name, m.objAddr, m.hp, m.maxHp, m.distance);
-                    if(g_dllInjected && g_pBotCmd) {
-                        g_pBotCmd->targetAddr = m.objAddr;
-                        g_pBotCmd->attackOn = 1;
-                        DebugLog("[TARGET] DLL attack ON via shared memory");
-                        wchar_t s[128]; swprintf_s(s,L"  Target: %s (DLL attack ON)",m.name);
-                        SetWindowTextW(g_hStatus,s);
-                    } else {
-                        WriteGameTarget(m.objAddr);
-                        // Auto-start attack timer if not running
-                        if(SendMessage(g_hChkAttack,BM_GETCHECK,0,0)!=BST_CHECKED){
-                            SendMessageW(g_hChkAttack,BM_SETCHECK,BST_CHECKED,0);
-                            SetTimer(hWnd,2,1500,NULL);
-                            DebugLog("[TARGET] Auto attack timer started");
-                        }
-                        wchar_t s[128]; swprintf_s(s,L"  Attacking: %s",m.name);
-                        SetWindowTextW(g_hStatus,s);
-                    }
-                }
-            }
+        case IDM_TOGGLE_ATTACK: {
+            g_targeter.enabled = !g_targeter.enabled;
+            g_attacker.enabled = g_targeter.enabled;
+            wchar_t s[64]; swprintf_s(s, L"  Attack: %s", g_attacker.enabled ? L"ON" : L"OFF");
+            SetWindowTextW(g_hStatus, s);
             break;
         }
 
-        // Player double-click -> follow
-        if((HWND)lParam==g_hPlayerList&&code==LBN_DBLCLK) {
-            int sel=(int)SendMessageW(g_hPlayerList,LB_GETCURSEL,0,0);
-            if(sel!=LB_ERR&&sel>=0&&sel<(int)g_cachedPlayers.size()){
-                auto&p=g_cachedPlayers[sel];
-                g_followTargetAddr=p.objAddr; wcscpy_s(g_followName,p.name);
-                DebugLog("[FOLLOW] Following: %S (0x%08X) Dist=%.1f HP=%d/%d", p.name, p.objAddr, p.distance, p.hp, p.maxHp);
-                if(g_dllInjected && g_pBotCmd) {
-                    g_pBotCmd->followAddr = p.objAddr;
-                    g_pBotCmd->followOn = 1;
-                    KillTimer(hWnd,3);
-                    DebugLog("[FOLLOW] DLL follow ON via shared memory");
-                    wchar_t s[128]; swprintf_s(s,L"  Following: %s (DLL follow ON)",p.name);
-                    SetWindowTextW(g_hStatus,s);
-                } else {
-                    SendMessageW(g_hChkFollow,BM_SETCHECK,BST_CHECKED,0);
-                    SetTimer(hWnd,3,800,NULL);
-                    DebugLog("[FOLLOW] Direct follow started (800ms timer)");
-                    wchar_t s[128]; swprintf_s(s,L"  Following: %s (dist: %.1f)",p.name,p.distance);
-                    SetWindowTextW(g_hStatus,s);
-                }
-            }
+        case IDM_TOGGLE_HEAL:
+            g_healer.enabled = !g_healer.enabled;
+            { wchar_t s[64]; swprintf_s(s, L"  Heal: %s", g_healer.enabled ? L"ON" : L"OFF");
+            SetWindowTextW(g_hStatus, s); }
+            break;
+
+        case IDM_TOGGLE_FOLLOW:
+            g_follower.enabled = !g_follower.enabled;
+            { wchar_t s[64]; swprintf_s(s, L"  Follow: %s", g_follower.enabled ? L"ON" : L"OFF");
+            SetWindowTextW(g_hStatus, s); }
+            break;
+
+        case IDM_TOGGLE_LOOT:
+            g_looter.enabled = !g_looter.enabled;
+            { wchar_t s[64]; swprintf_s(s, L"  Loot: %s", g_looter.enabled ? L"ON" : L"OFF");
+            SetWindowTextW(g_hStatus, s); }
+            break;
+
+        case IDM_TOGGLE_ALL: {
+            bool on = !(g_targeter.enabled && g_attacker.enabled && g_healer.enabled && g_looter.enabled);
+            g_targeter.enabled = on;
+            g_attacker.enabled = on;
+            g_healer.enabled = on;
+            g_looter.enabled = on;
+            g_follower.enabled = on;
+            g_modMgr.RefreshTreeViewLabels(g_hTreeView);
+            SetWindowTextW(g_hStatus, on ? L"  ALL ON" : L"  ALL OFF");
             break;
         }
 
-        if(id==3001){
-            g_selectedTargetAddr=0;g_selTargetName[0]=0;
-            if(g_pBotCmd){g_pBotCmd->attackOn=0;g_pBotCmd->targetAddr=0;}
-            SetWindowTextW(g_hTargetName,L"(double-click a mob to select)");SetWindowTextW(g_hTargetHP,L"");
-            break;
-        }
-        if(id==3002){
-            g_followTargetAddr=0;g_followName[0]=0;g_followPaused=false;
-            if(g_pBotCmd){g_pBotCmd->followOn=0;g_pBotCmd->followAddr=0;}
-            SendMessageW(g_hChkFollow,BM_SETCHECK,BST_UNCHECKED,0);KillTimer(hWnd,3);
-            SetWindowTextW(g_hFollowName,L"(double-click a player to follow)");SetWindowTextW(g_hFollowDist,L"");
-            SetWindowTextW(g_hStatus,L"  Follow: OFF");
+        case IDM_STOP_ALL: {
+            g_targeter.enabled = false;
+            g_attacker.enabled = false;
+            g_healer.enabled = false;
+            g_partyHealer.enabled = false;
+            g_looter.enabled = false;
+            g_follower.enabled = false;
+            g_extra.enabled = false;
+            g_attacker.targetAddr = 0;
+            g_follower.targetAddr = 0;
+            g_modMgr.RefreshTreeViewLabels(g_hTreeView);
+            SetWindowTextW(g_hStatus, L"  ALL STOPPED");
+            DebugLog("[STOP] All modules stopped");
             break;
         }
 
-        if(id==2001){
-            BOOL on=SendMessage((HWND)lParam,BM_GETCHECK,0,0)==BST_CHECKED;
-            if(on){
-                // Read mob name filter
-                wchar_t filter[64]={}; GetWindowTextW(g_hAtkName, filter, 64);
-                bool hasFilter = (filter[0] != 0);
-                if(g_dllInjected && g_pBotCmd) {
-                    KillTimer(hWnd,3); SendMessageW(g_hChkFollow,BM_SETCHECK,BST_UNCHECKED,0);
-                    if(g_selectedTargetAddr<=0x1000&&!g_cachedMobs.empty()){
-                        for(auto&m:g_cachedMobs){
-                            if(m.hp<=0||IsNPC(m.name)) continue;
-                            if(hasFilter && wcsstr(m.name, filter)==NULL) continue;
-                            g_selectedTargetAddr=m.objAddr;wcscpy_s(g_selTargetName,m.name);g_pBotCmd->targetAddr=m.objAddr;break;
-                        }
-                    }
-                    g_pBotCmd->attackOn=1;
-                    SetWindowTextW(g_hStatus,L"  [DLL] Auto Attack: ON");
-                } else {
-                    KillTimer(hWnd,3); SendMessageW(g_hChkFollow,BM_SETCHECK,BST_UNCHECKED,0);
-                    if(g_selectedTargetAddr<=0x1000&&!g_cachedMobs.empty()){
-                        for(auto&m:g_cachedMobs){
-                            if(m.hp<=0||IsNPC(m.name)) continue;
-                            if(hasFilter && wcsstr(m.name, filter)==NULL) continue;
-                            g_selectedTargetAddr=m.objAddr;wcscpy_s(g_selTargetName,m.name);WriteGameTarget(m.objAddr);break;
-                        }
-                    }
-                    SetTimer(hWnd,2,1500,NULL); SetWindowTextW(g_hStatus,L"  Auto Attack: ON  (F1 to toggle)");
-                }
-            } else {
-                if(g_dllInjected && g_pBotCmd) g_pBotCmd->attackOn=0;
-                else KillTimer(hWnd,2);
-                SetWindowTextW(g_hStatus,L"  Auto Attack: OFF");
-            }
+        case IDM_SCALE_UP:
+            g_scale += 0.5f;
+            { wchar_t s[64]; swprintf_s(s, L"  Scale: %.2f", g_scale);
+            SetWindowTextW(g_hStatus, s); }
             break;
-        }
-        if(id==2004){
-            BOOL on=SendMessage((HWND)lParam,BM_GETCHECK,0,0)==BST_CHECKED;
-            if(on){
-                if(g_dllInjected && g_pBotCmd) {
-                    KillTimer(hWnd,2); SendMessageW(g_hChkAttack,BM_SETCHECK,BST_UNCHECKED,0);
-                    if(g_followTargetAddr<=0x1000&&!g_cachedPlayers.empty()){
-                        auto&p=g_cachedPlayers[0]; g_followTargetAddr=p.objAddr; wcscpy_s(g_followName,p.name);
-                    }
-                    if(g_followTargetAddr>0x1000){g_pBotCmd->followAddr=g_followTargetAddr;g_pBotCmd->followOn=1;wchar_t s[128];swprintf_s(s,L"  [DLL] Following: %s",g_followName);SetWindowTextW(g_hStatus,s);}
-                    else{SendMessageW(g_hChkFollow,BM_SETCHECK,BST_UNCHECKED,0);SetWindowTextW(g_hStatus,L"  No players to follow");}
-                } else {
-                    KillTimer(hWnd,2); SendMessageW(g_hChkAttack,BM_SETCHECK,BST_UNCHECKED,0);
-                    if(g_followTargetAddr<=0x1000&&!g_cachedPlayers.empty()){
-                        auto&p=g_cachedPlayers[0]; g_followTargetAddr=p.objAddr; wcscpy_s(g_followName,p.name);
-                    }
-                    if(g_followTargetAddr>0x1000){SetTimer(hWnd,3,800,NULL);wchar_t s[128];swprintf_s(s,L"  Following: %s  (F3 to toggle)",g_followName);SetWindowTextW(g_hStatus,s);}
-                    else{SendMessageW(g_hChkFollow,BM_SETCHECK,BST_UNCHECKED,0);SetWindowTextW(g_hStatus,L"  No players to follow");}
-                }
-            } else { KillTimer(hWnd,3); SetWindowTextW(g_hStatus,L"  Follow: OFF"); }
+
+        case IDM_SCALE_DOWN:
+            g_scale -= 0.5f;
+            if (g_scale < 0.5f) g_scale = 0.5f;
+            { wchar_t s[64]; swprintf_s(s, L"  Scale: %.2f", g_scale);
+            SetWindowTextW(g_hStatus, s); }
             break;
-        }
-        if(id==2002){
-            BOOL on=SendMessage((HWND)lParam,BM_GETCHECK,0,0)==BST_CHECKED;
-            wchar_t s[64];swprintf_s(s,L"Auto Heal %s",on?L"ON":L"OFF");SetWindowTextW(g_hStatus,s);
+
+        case IDM_DEBUG:
+            OpenDebugConsole(hWnd);
             break;
-        }
-        if(id==2005){
-            BOOL on=SendMessage((HWND)lParam,BM_GETCHECK,0,0)==BST_CHECKED;
-            g_autoLoot = (on != FALSE);
-            if(on){
-                SetTimer(hWnd,4,1200,NULL);
-                DebugLog("[LOOT] Auto Loot: ON (1200ms timer)");
-                SetWindowTextW(g_hStatus,L"  Auto Loot: ON  (F4 to toggle)");
-            } else {
-                KillTimer(hWnd,4);
-                DebugLog("[LOOT] Auto Loot: OFF");
-                SetWindowTextW(g_hStatus,L"  Auto Loot: OFF");
-            }
+
+        case IDM_EXIT:
+            DestroyWindow(hWnd);
             break;
         }
         break;
     }
 
-    case WM_TIMER: {
-        // Global hotkeys (F1/F2/F3/F4) - check on key press transition
-        if(wParam==1) {
-            // Check hotkeys first - only toggle on key press transition (not held down)
-            static bool f1Prev = false, f2Prev = false, f3Prev = false, f4Prev = false;
-            bool f1Curr = (GetAsyncKeyState(VK_F1) & 1) != 0;
-            bool f2Curr = (GetAsyncKeyState(VK_F2) & 1) != 0;
-            bool f3Curr = (GetAsyncKeyState(VK_F3) & 1) != 0;
-            bool f4Curr = (GetAsyncKeyState(VK_F4) & 1) != 0;
-
-            // F2: STOP ALL (panic button)
-            if (f2Curr && !f2Prev) {
-                KillTimer(hWnd,2); KillTimer(hWnd,3); KillTimer(hWnd,4);
-                SendMessage(g_hChkAttack,BM_SETCHECK,BST_UNCHECKED,0);
-                SendMessage(g_hChkFollow,BM_SETCHECK,BST_UNCHECKED,0);
-                SendMessage(g_hChkLoot,BM_SETCHECK,BST_UNCHECKED,0);
-                g_selectedTargetAddr=0; g_followTargetAddr=0; g_autoLoot=false; g_followPaused=false;
-                wcscpy_s(g_selTargetName,L""); wcscpy_s(g_followName,L"");
-                if(g_pBotCmd){
-                    g_pBotCmd->attackOn=0;g_pBotCmd->followOn=0;
-                    g_pBotCmd->targetAddr=0;g_pBotCmd->followAddr=0;
-                    g_pBotCmd->healOn=0;
-                }
-                SetWindowTextW(g_hStatus,L"  [F2] ALL STOPPED");
-                DebugLog("[F2] ====================================");
-                DebugLog("[F2] PANIC STOP - all timers killed");
-                DebugLog("[F2] Stats: Kills=%d Loots=%d", g_killCount, g_lootCount);
-                DebugLog("[F2] ====================================");
-            }
-
-            // F1 toggle: only act on press transition (release->press)
-            if (f1Curr && !f1Prev) {
-                if(g_connected) {
-                    BOOL cur=SendMessage(g_hChkAttack,BM_GETCHECK,0,0)==BST_CHECKED;
-                    SendMessage(g_hChkAttack,BM_SETCHECK,cur?BST_UNCHECKED:BST_CHECKED,0);
-                    if(!cur) {
-                        KillTimer(hWnd,3); SendMessageW(g_hChkFollow,BM_SETCHECK,BST_UNCHECKED,0);
-                        // Read mob name filter
-                        wchar_t filter[64]={}; GetWindowTextW(g_hAtkName, filter, 64);
-                        bool hasFilter = (filter[0] != 0);
-                        if(g_selectedTargetAddr<=0x1000&&!g_cachedMobs.empty()){
-                            for(auto&m:g_cachedMobs){
-                                if(m.hp<=0||IsNPC(m.name)) continue;
-                                if(hasFilter && wcsstr(m.name, filter)==NULL) continue;
-                                g_selectedTargetAddr=m.objAddr;wcscpy_s(g_selTargetName,m.name);
-                                if(g_dllInjected && g_pBotCmd) g_pBotCmd->targetAddr=m.objAddr;
-                                else WriteGameTarget(m.objAddr);
-                                break;
-                            }
-                        }
-                        if(g_dllInjected && g_pBotCmd) {
-                            g_pBotCmd->attackOn=1;
-                            SetWindowTextW(g_hStatus,L"  [DLL][F1] Auto Attack: ON");
-                        } else {
-                            SetTimer(hWnd,2,1500,NULL); SetWindowTextW(g_hStatus,L"  [F1] Auto Attack: ON");
-                        }
-                    } else {
-                        if(g_dllInjected && g_pBotCmd) g_pBotCmd->attackOn=0;
-                        else KillTimer(hWnd,2);
-                        SetWindowTextW(g_hStatus,L"  [F1] Auto Attack: OFF");
-                    }
-                }
-            }
-            // F3 toggle: only act on press transition (release->press)
-            if (f3Curr && !f3Prev) {
-                if(g_connected) {
-                    BOOL cur=SendMessage(g_hChkFollow,BM_GETCHECK,0,0)==BST_CHECKED;
-                    SendMessage(g_hChkFollow,BM_SETCHECK,cur?BST_UNCHECKED:BST_CHECKED,0);
-                    if(!cur) {
-                        KillTimer(hWnd,2); SendMessageW(g_hChkAttack,BM_SETCHECK,BST_UNCHECKED,0);
-                        if(g_followTargetAddr<=0x1000&&!g_cachedPlayers.empty()){
-                            auto&p=g_cachedPlayers[0]; g_followTargetAddr=p.objAddr; wcscpy_s(g_followName,p.name);
-                        }
-                        if(g_dllInjected && g_pBotCmd) {
-                            if(g_followTargetAddr>0x1000){g_pBotCmd->followAddr=g_followTargetAddr;g_pBotCmd->followOn=1;wchar_t s[128];swprintf_s(s,L"  [DLL][F3] Following: %s",g_followName);SetWindowTextW(g_hStatus,s);}
-                            else{SendMessageW(g_hChkFollow,BM_SETCHECK,BST_UNCHECKED,0);SetWindowTextW(g_hStatus,L"  No players to follow");}
-                        } else {
-                            if(g_followTargetAddr>0x1000){SetTimer(hWnd,3,800,NULL);wchar_t s[128];swprintf_s(s,L"  [F3] Following: %s",g_followName);SetWindowTextW(g_hStatus,s);}
-                            else{SendMessageW(g_hChkFollow,BM_SETCHECK,BST_UNCHECKED,0);SetWindowTextW(g_hStatus,L"  No players to follow");}
-                        }
-                    } else {
-                        if(g_dllInjected && g_pBotCmd) g_pBotCmd->followOn=0;
-                        else KillTimer(hWnd,3);
-                        SetWindowTextW(g_hStatus,L"  [F3] Follow: OFF");
-                    }
-                }
-            }
-            // F4 toggle: auto loot
-            if (f4Curr && !f4Prev) {
-                if(g_connected) {
-                    BOOL cur=SendMessage(g_hChkLoot,BM_GETCHECK,0,0)==BST_CHECKED;
-                    SendMessage(g_hChkLoot,BM_SETCHECK,cur?BST_UNCHECKED:BST_CHECKED,0);
-                    g_autoLoot = !cur;
-                    if(!cur) {
-                        SetTimer(hWnd,4,1200,NULL);
-                        DebugLog("[LOOT][F4] Auto Loot: ON");
-                        SetWindowTextW(g_hStatus,L"  [F4] Auto Loot: ON");
-                    } else {
-                        KillTimer(hWnd,4);
-                        DebugLog("[LOOT][F4] Auto Loot: OFF");
-                        SetWindowTextW(g_hStatus,L"  [F4] Auto Loot: OFF");
-                    }
-                }
-            }
-
-            // F5/F6: scale calibration (F5 = increase, F6 = decrease)
-            bool f5Curr = (GetAsyncKeyState(VK_F5) & 1) != 0;
-            bool f6Curr = (GetAsyncKeyState(VK_F6) & 1) != 0;
-            if (f5Curr) {
-                g_scale += 0.5f;
-                wchar_t s[64]; swprintf_s(s, L"  Scale: %.2f px/unit", g_scale);
-                SetWindowTextW(g_hStatus, s);
-                DebugLog("[SCALE] F5 -> scale=%.2f", g_scale);
-            }
-            if (f6Curr) {
-                g_scale -= 0.5f;
-                if (g_scale < 0.5f) g_scale = 0.5f;
-                wchar_t s[64]; swprintf_s(s, L"  Scale: %.2f px/unit", g_scale);
-                SetWindowTextW(g_hStatus, s);
-                DebugLog("[SCALE] F6 -> scale=%.2f", g_scale);
-            }
-
-            f1Prev = f1Curr;
-            f2Prev = f2Curr;
-            f3Prev = f3Curr;
-            f4Prev = f4Curr;
-            UpdateUI();
-        }
-
-        if(wParam==2) { // Attack - full auto cycle
-            HWND gw = FindGameWindow();
-            if(!gw || GetForegroundWindow()!=gw || IsIconic(gw)) break;
-            if(!g_hProcess) break;
-
-            // Skip if loot is walking (timer 4 owns the cursor)
-            if(g_hasPendingCorpse) break;
-
-            wchar_t filter[64]={};
-            GetWindowTextW(g_hAtkName, filter, 64);
-            bool hasFilter = (filter[0] != 0);
-
-            // Step 1: If no target, find first alive mob (verify from game memory)
-            if(g_selectedTargetAddr <= 0x1000) {
-                bool found=false;
-                for(auto&m:g_cachedMobs){
-                    if(m.hp<=0||IsNPC(m.name)||IsDeadAddr(m.objAddr)) continue;
-                    if(hasFilter && wcsstr(m.name, filter)==NULL) continue;
-                    // Verify mob is actually alive by reading HP from game memory
-                    DWORD liveHp=0; SIZE_T lr=0;
-                    ReadProcessMemory(g_hProcess,(LPCVOID)(m.objAddr+Game::ENT_HP),&liveHp,4,&lr);
-                    if(lr!=4 || liveHp<=0) continue;
-                    g_selectedTargetAddr=m.objAddr;
-                    wcscpy_s(g_selTargetName,m.name);
-                    DebugLog("[ATK] Auto-target: %S (0x%08X) HP=%d", m.name, m.objAddr, liveHp);
-                    found=true;
-                    break;
-                }
-                if(!found) break;
-            }
-
-            // Step 2: Check if current target is alive
-            DWORD hp=0; SIZE_T r=0;
-            ReadProcessMemory(g_hProcess,(LPCVOID)(g_selectedTargetAddr+Game::ENT_HP),&hp,4,&r);
-
-            if(r!=4 || hp<=0) {
-                // Target died - save corpse and find next
-                int rawX=0, rawY=0;
-                SIZE_T r2=0;
-                ReadProcessMemory(g_hProcess,(LPCVOID)(g_selectedTargetAddr+Game::ENT_RAW_X),&rawX,4,&r2);
-                ReadProcessMemory(g_hProcess,(LPCVOID)(g_selectedTargetAddr+Game::ENT_RAW_Y),&rawY,4,&r2);
-                float cx = rawX / 65536.0f;
-                float cy = rawY / 65536.0f;
-
-                g_killCount++;
-                DebugLog("[ATK] Killed: %S | Kills=%d", g_selTargetName, g_killCount);
-
-                // Save corpse for auto-loot
-                if(g_autoLoot && r2==4 && (rawX!=0||rawY!=0)) {
-                    g_pendingCorpseX = cx;
-                    g_pendingCorpseY = cy;
-                    g_pendingCorpseAddr = g_selectedTargetAddr;
-                    wcscpy_s(g_pendingCorpseName, g_selTargetName);
-                    g_pendingCorpseTime = GetTickCount();
-                    g_hasPendingCorpse = true;
-                    DebugLog("[LOOT] Queue corpse: '%S' (%.1f, %.1f)", g_pendingCorpseName, cx, cy);
-                }
-
-                // Save dead address to avoid re-targeting
-                DWORD deadAddr = g_selectedTargetAddr;
-                MarkDead(deadAddr);
-
-                // Clear target
-                g_selectedTargetAddr = 0;
-                g_selTargetName[0] = 0;
-
-                // Find next alive mob (verify from game memory)
-                bool found=false;
-                for(auto&m:g_cachedMobs){
-                    if(m.hp<=0||IsNPC(m.name)||m.objAddr==deadAddr||IsDeadAddr(m.objAddr)) continue;
-                    if(hasFilter && wcsstr(m.name, filter)==NULL) continue;
-                    // Verify mob is actually alive
-                    DWORD liveHp=0; SIZE_T lr=0;
-                    ReadProcessMemory(g_hProcess,(LPCVOID)(m.objAddr+Game::ENT_HP),&liveHp,4,&lr);
-                    if(lr!=4 || liveHp<=0) continue;
-                    g_selectedTargetAddr=m.objAddr;
-                    wcscpy_s(g_selTargetName,m.name);
-                    DebugLog("[ATK] Next: %S (0x%08X) HP=%d", m.name, m.objAddr, liveHp);
-                    MoveToTile(m.x, m.y);
-                    found=true;
-                    break;
-                }
-                if(!found) {
-                    DebugLog("[ATK] All mobs dead%s", hasFilter ? " (filter)" : "");
-                    SetWindowTextW(g_hStatus, hasFilter ? L"  No matching mobs" : L"  All mobs dead");
-                }
-            } else {
-                // Target alive - attack with mouse click
-                int rawX=0, rawY=0;
-                SIZE_T r2=0;
-                ReadProcessMemory(g_hProcess,(LPCVOID)(g_selectedTargetAddr+Game::ENT_RAW_X),&rawX,4,&r2);
-                ReadProcessMemory(g_hProcess,(LPCVOID)(g_selectedTargetAddr+Game::ENT_RAW_Y),&rawY,4,&r2);
-                if(r2!=4||(rawX==0&&rawY==0)) break;
-                float mobGX = rawX / 65536.0f;
-                float mobGY = rawY / 65536.0f;
-
-                // Convert to screen coords and click on mob
-                int mobCX, mobCY;
-                if(!GameToClient(mobGX, mobGY, mobCX, mobCY)) break;
-
-                // Check if mob is on screen
-                HWND gw2 = FindGameWindow();
-                RECT rc;
-                GetClientRect(gw2, &rc);
-                if(mobCX < 0 || mobCX > rc.right || mobCY < 0 || mobCY > rc.bottom) {
-                    // Mob off screen - walk toward it first
-                    MoveToTile(mobGX, mobGY);
-                    DebugLog("[ATK] Off-screen, walking toward %S (%.1f,%.1f)", g_selTargetName, mobGX, mobGY);
-                } else {
-                    // Mob on screen - write cursor to mob's EXACT position + Enter to attack
-                    WORD tileX2 = (WORD)((int)(mobGX / 24.0f));
-                    WORD tileY2 = (WORD)((int)(mobGY / 24.0f));
-                    if(tileX2 > 27) tileX2 = 27;
-                    if(tileY2 > 27) tileY2 = 27;
-
-                    DWORD cur = GetCursorAddr();
-                    if(cur > 0x1000) {
-                        Write<WORD>(cur + Game::CUR_X, tileX2);
-                        Write<WORD>(cur + Game::CUR_Y, tileY2);
-                        int rawX = (int)(mobGX * 65536.0f);
-                        int rawY = (int)(mobGY * 65536.0f);
-                        Write<int>(cur + Game::CUR_RAW_X, rawX);
-                        Write<int>(cur + Game::CUR_RAW_Y, rawY);
-                        DebugLog("[ATK] Attack: %S HP=%d tile(%d,%d) raw(%d,%d)", g_selTargetName, hp, tileX2, tileY2, rawX, rawY);
-                        Sleep(50);
-                        HWND gw = FindGameWindow();
-                        if(gw && GetForegroundWindow()==gw && !IsIconic(gw)) {
-                            SendInputKey(VK_RETURN);
-                            DebugLog("[ATK] Enter sent");
-                        }
-                    }
-                }
-            }
-        }
-
-        if(wParam==3) { // Follow
-            HWND gw = FindGameWindow();
-            if(!gw || GetForegroundWindow()!=gw || IsIconic(gw)) break;
-
-            if(g_followTargetAddr>0x1000&&g_hProcess) {
-                SIZE_T r=0; int rx=0,ry=0;
-                ReadProcessMemory(g_hProcess,(LPCVOID)(g_followTargetAddr+Game::ENT_RAW_X),&rx,4,&r);
-                ReadProcessMemory(g_hProcess,(LPCVOID)(g_followTargetAddr+Game::ENT_RAW_Y),&ry,4,&r);
-                DebugLog("[FOLLOW TIMER] addr=0x%08X r=%d rx=%d ry=%d name=%S", g_followTargetAddr, (int)r, rx, ry, g_followName);
-                if(r==4&&(rx!=0||ry!=0)) {
-                    FollowTarget();
-                    g_followPaused = false;
-                } else {
-                    // Address invalid - player may have changed zone
-                    // Try to find them by name in the current entity tree
-                    DWORD newAddr = FindPlayerByName(g_followName);
-                    if (newAddr > 0x1000) {
-                        g_followTargetAddr = newAddr;
-                        g_followPaused = false;
-                        DebugLog("[FOLLOW] Reconnected to '%S' at new addr=0x%08X", g_followName, newAddr);
-                        SetWindowTextW(g_hStatus, L"  Follow: reconnected after zone change");
-                        FollowTarget();
-                    } else {
-                        // Player not found yet - keep searching (don't cancel)
-                        if (!g_followPaused) {
-                            g_followPaused = true;
-                            DebugLog("[FOLLOW] Target '%S' not found, searching...", g_followName);
-                            SetWindowTextW(g_hStatus, L"  Follow: searching for target...");
-                        }
-                    }
-                }
-            } else if (g_followPaused && g_followName[0] != 0) {
-                // Was paused, keep trying to find the player
-                DWORD newAddr = FindPlayerByName(g_followName);
-                if (newAddr > 0x1000) {
-                    g_followTargetAddr = newAddr;
-                    g_followPaused = false;
-                    DebugLog("[FOLLOW] Found '%S' after pause at addr=0x%08X", g_followName, newAddr);
-                    SetWindowTextW(g_hStatus, L"  Follow: reconnected!");
-                    FollowTarget();
-                }
-            } else {
-                DebugLog("[FOLLOW TIMER] invalid addr=0x%08X process=%d", g_followTargetAddr, g_hProcess!=NULL);
-            }
-        }
-
-        if(wParam==4) { // Auto Loot
-            if(!g_autoLoot || !g_hProcess) { g_hasPendingCorpse=false; break; }
-            HWND w=FindGameWindow();
-            if(!w || GetForegroundWindow()!=w || IsIconic(w)) { g_hasPendingCorpse=false; break; }
-
-            // Use g_cachedCorpses if available, otherwise use g_hasPendingCorpse data
-            float lootX=0, lootY=0;
-            bool foundCorpse = false;
-
-            if(!g_cachedCorpses.empty()) {
-                auto& c = g_cachedCorpses[0];
-                lootX = c.x;
-                lootY = c.y;
-                foundCorpse = true;
-            } else if(g_hasPendingCorpse) {
-                // Corpse not yet in entity scan - use saved position from kill
-                lootX = g_pendingCorpseX;
-                lootY = g_pendingCorpseY;
-                foundCorpse = true;
-            }
-
-            if(!foundCorpse) { g_hasPendingCorpse=false; break; }
-
-            float dx = lootX - g_selfX;
-            float dy = lootY - g_selfY;
-            float dist = sqrtf(dx*dx + dy*dy);
-
-            DebugLog("[LOOT] dist=%.1f self(%.1f,%.1f) pending=%d corpses=%d", dist, g_selfX, g_selfY, g_hasPendingCorpse, (int)g_cachedCorpses.size());
-
-            if(dist > 10.0f) {
-                DebugLog("[LOOT] Walk -> (%.1f,%.1f)", lootX, lootY);
-                MoveToTile(lootX, lootY);
-            } else {
-                int cx, cy;
-                if(GameToClient(lootX, lootY, cx, cy)) {
-                    DebugLog("[LOOT] Click corpse client(%d,%d)", cx, cy);
-                    ClickAtClient(cx, cy);
-                    Sleep(400);
-                    SendInputKey(VK_RETURN);
-                    Sleep(300);
-                    g_lootCount++;
-                    wcscpy_s(g_lastLootName, g_hasPendingCorpse ? g_pendingCorpseName : L"");
-                    g_lastLootTime = GetTickCount();
-                    DebugLog("[LOOT] Done #%d | K=%d L=%d", g_lootCount, g_killCount, g_lootCount);
-                }
-                g_hasPendingCorpse = false;
-            }
+    case WM_KEYDOWN: {
+        switch (wParam) {
+        case VK_F1: SendMessage(hWnd, WM_COMMAND, IDM_TOGGLE_ATTACK, 0); break;
+        case VK_F2: SendMessage(hWnd, WM_COMMAND, IDM_STOP_ALL, 0); break;
+        case VK_F3: SendMessage(hWnd, WM_COMMAND, IDM_TOGGLE_FOLLOW, 0); break;
+        case VK_F4: SendMessage(hWnd, WM_COMMAND, IDM_TOGGLE_LOOT, 0); break;
+        case VK_F5: SendMessage(hWnd, WM_COMMAND, IDM_SCALE_UP, 0); break;
+        case VK_F6: SendMessage(hWnd, WM_COMMAND, IDM_SCALE_DOWN, 0); break;
         }
         break;
     }
 
-    case WM_SIZE: if(g_hStatus) SendMessage(g_hStatus,WM_SIZE,0,0); break;
+    case WM_TIMER:
+        if (wParam == 1) UpdateUI();
+        break;
+
+    case WM_SIZE:
+        if (g_hStatus) SendMessage(g_hStatus, WM_SIZE, 0, 0);
+        break;
+
     case WM_DESTROY:
         DebugLog("[EXIT] Shutting down...");
-        CloseDebugConsole();
-        KillTimer(hWnd,1);KillTimer(hWnd,2);KillTimer(hWnd,3);KillTimer(hWnd,4);
-        if(g_hFont)DeleteObject(g_hFont);
-        if(g_hProcess)CloseHandle(g_hProcess);
-        PostQuitMessage(0); break;
-    default: return DefWindowProcW(hWnd,msg,wParam,lParam);
+        // Save all configs
+        { wchar_t cfgDir[MAX_PATH];
+        GetModuleFileNameW(NULL, cfgDir, MAX_PATH);
+        wchar_t* bs = wcsrchr(cfgDir, L'\\'); if (bs) *bs = 0;
+        wcscat_s(cfgDir, L"\\config");
+        g_modMgr.SaveAll(cfgDir); }
+        g_modMgr.StopAll();
+        if (g_hFont) DeleteObject(g_hFont);
+        if (g_hProcess) CloseHandle(g_hProcess);
+        if (g_hDebugConsole) DestroyWindow(g_hDebugConsole);
+        PostQuitMessage(0);
+        break;
+
+    default: return DefWindowProcW(hWnd, msg, wParam, lParam);
     }
     return 0;
 }
 
-int WINAPI wWinMain(HINSTANCE hInst,HINSTANCE,LPWSTR,int nShow) {
-    g_hInst=hInst;
-    INITCOMMONCONTROLSEX icex{sizeof(icex),ICC_TAB_CLASSES|ICC_BAR_CLASSES};
+// ============================================================
+// Entry point
+// ============================================================
+int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nShow) {
+    g_hInst = hInst;
+    INITCOMMONCONTROLSEX icex{sizeof(icex), ICC_TAB_CLASSES|ICC_BAR_CLASSES|ICC_TREEVIEW_CLASSES};
     InitCommonControlsEx(&icex);
+
     WNDCLASSEXW wc{}; wc.cbSize=sizeof(wc); wc.style=CS_HREDRAW|CS_VREDRAW;
     wc.lpfnWndProc=WndProc; wc.hInstance=hInst;
     wc.hCursor=LoadCursor(NULL,IDC_ARROW); wc.hbrBackground=(HBRUSH)(COLOR_BTNFACE+1);
     wc.lpszClassName=L"WarspearBotCtrl"; RegisterClassExW(&wc);
-    g_hWnd=CreateWindowExW(0,L"WarspearBotCtrl",L"Warspear Bot Controller v3",
+
+    g_hWnd=CreateWindowExW(0,L"WarspearBotCtrl",L"Warspear Bot v4",
         WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX,
-        CW_USEDEFAULT,CW_USEDEFAULT,610,500,NULL,NULL,hInst,NULL);
+        CW_USEDEFAULT,CW_USEDEFAULT,610,480,NULL,NULL,hInst,NULL);
     if(!g_hWnd) return 0;
     ShowWindow(g_hWnd,nShow); UpdateWindow(g_hWnd);
     SetTimer(g_hWnd,1,500,NULL);
+
     MSG msg{};
     while(GetMessageW(&msg,NULL,0,0)){TranslateMessage(&msg);DispatchMessageW(&msg);}
     return (int)msg.wParam;

@@ -1,4 +1,4 @@
-// warspear-bot22.dll - Mouse-based attack (cursor hover + click)
+// warspear-bot.dll - Arrow-key cursor navigation + attack
 #include <windows.h>
 #include <winuser.h>
 #include <math.h>
@@ -15,6 +15,13 @@ struct BotCmd {
 static BotCmd* g_cmd = NULL;
 static HANDLE g_logFile = INVALID_HANDLE_VALUE;
 static int g_killCount = 0;
+
+// ============================================================
+// Cursor action flags (at cursor_ptr + 0x7C)
+// ============================================================
+constexpr int CURSOR_ACTION_ATTACK = 8;
+constexpr int CURSOR_ACTION_MOVE   = 13;
+constexpr int CURSOR_ACTION_NONE   = 15;
 
 void Log(const char* msg) {
     OutputDebugStringA(msg);
@@ -38,76 +45,90 @@ DWORD GetSys() { return GR<DWORD>(0x00D387AC); }
 DWORD GetGM(DWORD s) { return (s > 0x1000) ? GR<DWORD>(s + 0x14) : 0; }
 DWORD GetLP(DWORD g) { return (g > 0x1000) ? GR<DWORD>(g + 0x40) : 0; }
 
-void SetTarget(DWORD addr) {
+// ============================================================
+// Cursor helpers
+// ============================================================
+DWORD GetCursorPtr() {
     DWORD gm = GetGM(GetSys());
-    DWORD lp = GetLP(gm);
-    if (lp > 0x1000) {
-        GW<DWORD>(lp + 0x290, addr);
-        GW<DWORD>(lp + 0x478, addr);
-    }
+    if (gm == 0) return 0;
+    return GR<DWORD>(gm + 0x123C);
+}
+
+short ReadCursorX() {
+    DWORD cur = GetCursorPtr();
+    return cur ? GR<short>(cur + 0x08) : 0;
+}
+
+short ReadCursorY() {
+    DWORD cur = GetCursorPtr();
+    return cur ? GR<short>(cur + 0x0A) : 0;
+}
+
+int ReadCursorAction() {
+    DWORD cur = GetCursorPtr();
+    return cur ? GR<int>(cur + 0x7C) : -1;
+}
+
+void WriteCursorTile(short tileX, short tileY) {
+    DWORD cur = GetCursorPtr();
+    if (!cur) return;
+    int rawX = (int)tileX * 0x180000;
+    int rawY = (int)tileY * 0x180000;
+    GW<short>(cur + 0x08, tileX);
+    GW<short>(cur + 0x0A, tileY);
+    GW<int>(cur + 0x10, rawX);
+    GW<int>(cur + 0x14, rawY);
+}
+
+// ============================================================
+// PostMessage-based key press (does not affect global keyboard)
+// ============================================================
+void PressGameKey(WORD vk) {
+    HWND hw = FindWindowA(NULL, "Warspear Online");
+    if (!hw || !IsWindow(hw)) return;
+
+    UINT scan = MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
+    LPARAM keyDown = 1 | ((LPARAM)scan << 16);
+    LPARAM keyUp = keyDown | (1LL << 30) | (1LL << 31);
+
+    PostMessageW(hw, WM_KEYDOWN, vk, keyDown);
+    PostMessageW(hw, WM_KEYUP, vk, keyUp);
 }
 
 void SendEnter() {
-    keybd_event(VK_RETURN, 0, 0, 0);
-    Sleep(30);
-    keybd_event(VK_RETURN, 0, KEYEVENTF_KEYUP, 0);
+    PressGameKey(VK_RETURN);
 }
 
-void ClickAt(HWND hw, int x, int y) {
-    POINT pt = { x, y };
-    ClientToScreen(hw, &pt);
-    INPUT inputs[3] = {};
-    inputs[0].type = INPUT_MOUSE;
-    inputs[0].mi.dx = (long)(pt.x * 65536.0 / GetSystemMetrics(SM_CXSCREEN));
-    inputs[0].mi.dy = (long)(pt.y * 65536.0 / GetSystemMetrics(SM_CYSCREEN));
-    inputs[0].mi.mouseData = 0;
-    inputs[0].mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
-    inputs[1].type = INPUT_MOUSE;
-    inputs[1].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
-    inputs[2].type = INPUT_MOUSE;
-    inputs[2].mi.dwFlags = MOUSEEVENTF_LEFTUP;
-    SendInput(3, inputs, sizeof(INPUT));
+// ============================================================
+// Follow: write cursor to target tile + Enter (walk)
+// ============================================================
+void DoFollow(DWORD targetAddr) {
+    DWORD lp = GetLP(GetGM(GetSys()));
+    if (lp <= 0x1000) return;
+
+    int ftx = GR<int>(targetAddr + 0x10);
+    int fty = GR<int>(targetAddr + 0x14);
+    short tileX = (short)(ftx / 65536);
+    short tileY = (short)(fty / 65536);
+    if (tileX > 27) tileX = 27;
+    if (tileY > 27) tileY = 27;
+
+    // Check distance: only walk if target is far enough
+    int plx = GR<int>(lp + 0x10) / 65536;
+    int ply = GR<int>(lp + 0x14) / 65536;
+    int dx = ftx / 65536 - plx;
+    int dy = fty / 65536 - ply;
+    int dist2 = dx * dx + dy * dy;
+    if (dist2 <= 9) return; // within 3 tiles
+
+    WriteCursorTile(tileX, tileY);
+    Sleep(100);
+    SendEnter();
 }
 
-// Move mouse to client coords WITHOUT clicking (hover only)
-void HoverAt(HWND hw, int x, int y) {
-    POINT pt = { x, y };
-    ClientToScreen(hw, &pt);
-    INPUT input = {};
-    input.type = INPUT_MOUSE;
-    input.mi.dx = (long)(pt.x * 65536.0 / GetSystemMetrics(SM_CXSCREEN));
-    input.mi.dy = (long)(pt.y * 65536.0 / GetSystemMetrics(SM_CYSCREEN));
-    input.mi.mouseData = 0;
-    input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
-    SendInput(1, &input, sizeof(INPUT));
-}
-
-// Click ground to deselect current target
-void ClickGroundDeselect(HWND hw, RECT winRect) {
-    int cx = (winRect.right - winRect.left) / 2 + 60;
-    int cy = (winRect.bottom - winRect.top) / 2 + 60;
-    ClickAt(hw, cx, cy);
-}
-
-// Convert game coords to screen coords (DLL version - runs inside game process)
-// Direction-based: clicks toward target at 80% of screen edge distance
-void GameToScreen(DWORD lp, int rawX, int rawY, int& sx, int& sy, RECT winRect) {
-    int playerRawX = GR<int>(lp + 0x10);
-    int playerRawY = GR<int>(lp + 0x14);
-    float gameDX = (rawX - playerRawX) / 65536.0f;
-    float gameDY = (rawY - playerRawY) / 65536.0f;
-    float len = sqrtf(gameDX * gameDX + gameDY * gameDY);
-    if (len < 0.5f) { sx = (winRect.left + winRect.right) / 2; sy = (winRect.top + winRect.bottom) / 2; return; }
-    float nx = gameDX / len;
-    float ny = gameDY / len;
-    float winW = (float)(winRect.right - winRect.left);
-    float winH = (float)(winRect.bottom - winRect.top);
-    float halfWin = (winW < winH ? winW : winH) / 2.0f;
-    float clickDist = halfWin * 0.8f;
-    sx = (winRect.left + winRect.right) / 2 + (int)(nx * clickDist);
-    sy = (winRect.top + winRect.bottom) / 2 + (int)(ny * clickDist);
-}
-
+// ============================================================
+// Attack: arrow-key cursor nav + action check + Enter
+// ============================================================
 DWORD WINAPI BotThread(LPVOID) {
     for (int i = 0; i < 50; i++) {
         HANDLE h = OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, L"Local\\WarspearBotShared");
@@ -117,89 +138,116 @@ DWORD WINAPI BotThread(LPVOID) {
     if (!g_cmd) return 1;
     Sleep(3000);
 
-    DWORD sys = GetSys();
-    DWORD gm = GetGM(sys);
-    DWORD lp = GetLP(gm);
     char buf[512];
-    wsprintfA(buf, "[INIT] sys=%08X gm=%08X lp=%08X", sys, gm, lp);
+    wsprintfA(buf, "[INIT] DLL loaded, attack=%d follow=%d", g_cmd->attackOn, g_cmd->followOn);
     Log(buf);
 
     HWND hw = FindWindowA(NULL, "Warspear Online");
-    RECT winRect;
-    GetWindowRect(hw, &winRect);
-    int windowCenterX = (winRect.left + winRect.right) / 2;
-    int windowCenterY = (winRect.top + winRect.bottom) / 2;
 
-    int count = 0;
+    // Attack state machine: 0=idle, 1=moving cursor, 2=ready to attack
+    int atkState = 0;
+    DWORD lastAtkTick = 0;
+    DWORD lastStepTick = 0;
+    DWORD atkCooldown = 1500;
+    DWORD lastLogTick = 0;
 
     while (true) {
-        // ===== FOLLOW MODE (Mouse-based: click toward target position) =====
+        DWORD now = GetTickCount();
+
+        // ===== FOLLOW MODE =====
         if (g_cmd->followOn && g_cmd->followAddr > 0x1000) {
             DWORD followTarget = (DWORD)g_cmd->followAddr;
             int fhp = GR<int>(followTarget + 0x10C);
-            int fvt = GR<int>(followTarget);
-            if (fhp > 0 && fvt >= 0x00400000 && fvt <= 0x01000000) {
-                int ftx = GR<int>(followTarget + 0x10);
-                int fty = GR<int>(followTarget + 0x14);
-                int followSX, followSY;
-                GameToScreen(lp, ftx, fty, followSX, followSY, winRect);
-
-                // Only click if target is far enough from player center
-                int plx = GR<int>(lp + 0x10) / 65536;
-                int ply = GR<int>(lp + 0x14) / 65536;
-                int dx = ftx / 65536 - plx;
-                int dy = fty / 65536 - ply;
-                int dist2 = dx * dx + dy * dy;
-                const float followDistance = 4.0f;
-                const float followDistanceSq = followDistance * followDistance;
-
-                if (dist2 > followDistanceSq) {
-                    if (!IsIconic(hw)) {
-                        ClickAt(hw, followSX, followSY);
-                    }
-                }
+            if (fhp > 0) {
+                DoFollow(followTarget);
             }
+            Sleep(200);
+            continue;
         }
 
-        // ===== ATTACK MODE (Mouse-based: deselect -> hover mob -> click mob) =====
+        // ===== ATTACK MODE =====
         if (g_cmd->attackOn && g_cmd->targetAddr > 0x1000) {
             DWORD targetAddr = (DWORD)g_cmd->targetAddr;
             int hp = GR<int>(targetAddr + 0x10C);
-            if (hp > 0) {
-                int mobRawX = GR<int>(targetAddr + 0x10);
-                int mobRawY = GR<int>(targetAddr + 0x14);
-                int mobSX, mobSY;
-                GameToScreen(lp, mobRawX, mobRawY, mobSX, mobSY, winRect);
 
-                if (count % 10 == 0) {
-                    wsprintfA(buf, "[ATK] target=0x%08X hp=%d screen=(%d,%d) kills=%d", targetAddr, hp, mobSX, mobSY, g_killCount);
-                    Log(buf);
+            if (hp <= 0) {
+                // Target dead
+                atkState = 0;
+                g_killCount++;
+                wsprintfA(buf, "[ATK] Target dead, kills=%d", g_killCount);
+                Log(buf);
+                Sleep(1000);
+                continue;
+            }
+
+            // Read cursor position
+            short cx = ReadCursorX();
+            short cy = ReadCursorY();
+
+            // Read mob tile position
+            int mobRawX = GR<int>(targetAddr + 0x10);
+            int mobRawY = GR<int>(targetAddr + 0x14);
+            short mobTX = (short)(mobRawX / 65536);
+            short mobTY = (short)(mobRawY / 65536);
+
+            switch (atkState) {
+            case 0: // IDLE -> start
+                atkState = 1;
+                lastStepTick = now;
+                break;
+
+            case 1: { // MOVING cursor toward mob
+                if (now - lastStepTick < 60) break;
+
+                if (cx == mobTX && cy == mobTY) {
+                    // Cursor on mob tile, check attack flag
+                    int action = ReadCursorAction();
+                    if (action == CURSOR_ACTION_ATTACK) {
+                        atkState = 2;
+                    }
+                    break;
                 }
 
-                // Step 1: Click ground to deselect
-                ClickGroundDeselect(hw, winRect);
-                Sleep(300);
+                // Move cursor one tile using arrow key
+                WORD vk = 0;
+                if (cx < mobTX) vk = VK_RIGHT;
+                else if (cx > mobTX) vk = VK_LEFT;
+                else if (cy < mobTY) vk = VK_DOWN;
+                else if (cy > mobTY) vk = VK_UP;
 
-                // Step 2: Hover mouse over mob
-                HoverAt(hw, mobSX, mobSY);
-                Sleep(500);
-
-                // Step 3: Click on mob (game sees cursor over entity = attack)
-                ClickAt(hw, mobSX, mobSY);
-            } else {
-                // Target dead - clear selection
-                GW<DWORD>(lp + 0x290, 0);
-                GW<DWORD>(lp + 0x478, 0);
-                g_killCount++;
-                Sleep(1000);
+                if (vk) PressGameKey(vk);
+                lastStepTick = now;
+                break;
             }
-            Sleep(1500);
+
+            case 2: { // ATTACK: cursor on mob, action==ATTACK, press Enter
+                int action = ReadCursorAction();
+                if (action != CURSOR_ACTION_ATTACK) {
+                    atkState = 1; // lost position, re-move
+                    break;
+                }
+
+                if (now - lastAtkTick < atkCooldown) break;
+
+                SendEnter();
+                lastAtkTick = now;
+
+                if (now - lastLogTick > 3000) {
+                    wsprintfA(buf, "[ATK] Attacking hp=%d cursor=(%d,%d) action=%d kills=%d",
+                        hp, cx, cy, action, g_killCount);
+                    Log(buf);
+                    lastLogTick = now;
+                }
+                break;
+            }
+            } // switch
+
+            Sleep(20);
         } else {
+            atkState = 0;
             g_killCount = 0;
             Sleep(200);
         }
-
-        count++;
     }
     return 0;
 }

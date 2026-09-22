@@ -147,6 +147,47 @@ inline int GetEntityMaxMana(DWORD objPtr) {
     return (int)ReadDword(objPtr + ENT_MAX_MANA);
 }
 
+// ---- Cursor action flags (at cursor_ptr + CUR_FLAG) ----
+constexpr int CURSOR_ACTION_ATTACK = 8;   // sword icon, cursor over attackable entity
+constexpr int CURSOR_ACTION_MOVE   = 13;  // boot icon, cursor over walkable tile
+constexpr int CURSOR_ACTION_NONE   = 15;  // no action available
+
+// ---- Cursor reading helpers ----
+inline DWORD GetCursorPtr(DWORD processHandle) {
+    DWORD gm = GetGameManager();
+    if (gm == 0) return 0;
+    DWORD cur = 0; SIZE_T r = 0;
+    ReadProcessMemory((HANDLE)processHandle, (LPCVOID)(gm + 0x123C), &cur, 4, &r);
+    return (r == 4) ? cur : 0;
+}
+
+inline int ReadCursorAction(DWORD processHandle, DWORD cursorPtr) {
+    if (cursorPtr == 0) return -1;
+    int action = 0; SIZE_T r = 0;
+    ReadProcessMemory((HANDLE)processHandle, (LPCVOID)(cursorPtr + CUR_FLAG), &action, 4, &r);
+    return (r == 4) ? action : -1;
+}
+
+inline void ReadCursorPos(DWORD processHandle, DWORD cursorPtr, short& cx, short& cy) {
+    cx = 0; cy = 0;
+    if (cursorPtr == 0) return;
+    SIZE_T r = 0;
+    ReadProcessMemory((HANDLE)processHandle, (LPCVOID)(cursorPtr + CUR_X), &cx, 2, &r);
+    ReadProcessMemory((HANDLE)processHandle, (LPCVOID)(cursorPtr + CUR_Y), &cy, 2, &r);
+}
+
+inline void WriteCursorPos(DWORD processHandle, DWORD cursorPtr, short tileX, short tileY) {
+    if (cursorPtr == 0) return;
+    int rawX = (int)tileX * 0x180000;
+    int rawY = (int)tileY * 0x180000;
+    SIZE_T r = 0;
+    ReadProcessMemory((HANDLE)processHandle, (LPCVOID)(cursorPtr + CUR_X), NULL, 0, &r); // validate
+    WriteProcessMemory((HANDLE)processHandle, (LPVOID)(cursorPtr + CUR_X), &tileX, 2, NULL);
+    WriteProcessMemory((HANDLE)processHandle, (LPVOID)(cursorPtr + CUR_Y), &tileY, 2, NULL);
+    WriteProcessMemory((HANDLE)processHandle, (LPVOID)(cursorPtr + CUR_RAW_X), &rawX, 4, NULL);
+    WriteProcessMemory((HANDLE)processHandle, (LPVOID)(cursorPtr + CUR_RAW_Y), &rawY, 4, NULL);
+}
+
 inline EntityType ClassifyEntity(DWORD vtable) {
     if (vtable == VTABLE_LOCAL_PLAYER) return EntityType::Player;
     if (vtable == VTABLE_BEAST)        return EntityType::BeastMob;

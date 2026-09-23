@@ -965,7 +965,7 @@ void RefreshTree() {
     TreeSetItemText(MID_FOLLOWER, 3, b);
 
     TreeSetItemText(MID_LOOTER, 0, G->looter.enabled ? L"Status: true" : L"Status: false");
-    swprintf(b,256,L"Radius: %d", (int)G->looter.radius);
+    swprintf(b,256,L"Radius: %d", (int)G->looter.walkRadius);
     TreeSetItemText(MID_LOOTER, 1, b);
     swprintf(b,256,L"Cooldown: %d ms", G->looter.cooldownMs);
     TreeSetItemText(MID_LOOTER, 2, b);
@@ -1041,7 +1041,7 @@ void TreeHandleClick(NMTREEVIEWW* ntv) {
             else if (td.subId == 3) { v = ShowInputInt(g_hWnd, L"Max Distance", (int)G->follower.maxDistance); G->follower.maxDistance = (float)v; }
             break;
         case MID_LOOTER:
-            if (td.subId == 1) { v = ShowInputInt(g_hWnd, L"Loot Radius", (int)G->looter.radius); G->looter.radius = (float)v; }
+            if (td.subId == 1) { v = ShowInputInt(g_hWnd, L"Loot Radius", (int)G->looter.walkRadius); G->looter.walkRadius = (float)v; }
             else if (td.subId == 2) { v = ShowInputInt(g_hWnd, L"Cooldown (ms)", G->looter.cooldownMs); G->looter.cooldownMs = v; }
             break;
         }

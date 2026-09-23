@@ -29,20 +29,17 @@ public:
         bool hasCorpse = false;
 
         if (!ctx.corpses.empty()) {
-            // Tree-based corpse (some servers keep dead mobs in tree)
             auto& c = ctx.corpses[0];
             corpseName = c.name;
             corpseX = c.x;
             corpseY = c.y;
             hasCorpse = true;
         } else if (ctx.pendingCorpse && ctx.pendingCorpse->valid) {
-            // Pending corpse (saved by attacker when mob died)
             corpseName = ctx.pendingCorpse->name;
             corpseX = ctx.pendingCorpse->x;
             corpseY = ctx.pendingCorpse->y;
             hasCorpse = true;
 
-            // Invalidate if too old (15 seconds)
             if (now - ctx.pendingCorpse->time > 15000) {
                 ctx.pendingCorpse->valid = false;
                 hasCorpse = false;
@@ -56,35 +53,39 @@ public:
         float dy = corpseY - ctx.selfY;
         float dist = sqrtf(dx*dx + dy*dy);
 
-        // Get cursor pointer for writing
-        DWORD curPtr = GetCursorPtr(ctx.hProcess);
-
-        if (dist > radius) {
-            // Walk toward corpse — call every tick, character walks incrementally
+        if (dist > walkRadius) {
+            // Too far — walk toward corpse first
+            DebugLog("[LOOT] Walking toward '%S' dist=%.1f", corpseName.c_str(), dist);
             WalkToPosition(ctx, gw, corpseX, corpseY);
         } else {
-            // Close enough, loot directly
-            LootCorpse(ctx, gw, curPtr, corpseX, corpseY);
-            lastLootTick = now;
-            lootCount++;
-            DebugLog("[LOOT] Looted '%S' #%d", corpseName.c_str(), lootCount);
-            // Invalidate pending corpse after looting
-            if (ctx.pendingCorpse) ctx.pendingCorpse->valid = false;
+            // Close enough — use real mouse click to interact with corpse on screen
+            int cx, cy;
+            if (GameToClient(ctx, corpseX, corpseY, cx, cy)) {
+                DebugLog("[LOOT] Click corpse '%S' -> client(%d,%d) dist=%.1f", corpseName.c_str(), cx, cy, dist);
+                ClickAtClient(gw, cx, cy);
+                Sleep(400);
+                SendLocalEnter(gw);
+                Sleep(300);
+                lootCount++;
+                DebugLog("[LOOT] Looted '%S' #%d | Total=%d", corpseName.c_str(), lootCount, lootCount);
+                if (ctx.pendingCorpse) ctx.pendingCorpse->valid = false;
+                lastLootTick = now;
+            }
         }
     }
 
     // Config
     bool  enabled = false;
-    float radius = 9999.0f;
-    int   cooldownMs = 500;
+    float walkRadius = 10.0f;   // walk until within this distance, then click
+    int   cooldownMs = 1200;
     int   lootCount = 0;
 
     void LoadConfig(const wchar_t* path) override {
         wchar_t buf[256];
         GetPrivateProfileStringW(L"Looter", L"Enabled", L"0", buf, 256, path);
         enabled = (buf[0] == L'1');
-        GetPrivateProfileStringW(L"Looter", L"Radius", L"20", buf, 256, path);
-        radius = (float)_wtof(buf);
+        GetPrivateProfileStringW(L"Looter", L"WalkRadius", L"10", buf, 256, path);
+        walkRadius = (float)_wtof(buf);
         GetPrivateProfileStringW(L"Looter", L"Cooldown", L"1200", buf, 256, path);
         cooldownMs = _wtoi(buf);
     }
@@ -92,8 +93,8 @@ public:
     void SaveConfig(const wchar_t* path) const override {
         WritePrivateProfileStringW(L"Looter", L"Enabled", enabled ? L"1" : L"0", path);
         wchar_t buf[32];
-        swprintf_s(buf, L"%.0f", radius);
-        WritePrivateProfileStringW(L"Looter", L"Radius", buf, path);
+        swprintf_s(buf, L"%.0f", walkRadius);
+        WritePrivateProfileStringW(L"Looter", L"WalkRadius", buf, path);
         swprintf_s(buf, L"%d", cooldownMs);
         WritePrivateProfileStringW(L"Looter", L"Cooldown", buf, path);
     }
@@ -107,7 +108,7 @@ public:
             parent, (HMENU)9301, GetModuleHandle(NULL), NULL);
 
         y += 24;
-        CreateWindowExW(0, L"static", L"Loot Radius:", WS_CHILD|WS_VISIBLE, x, y+2, 80, 18,
+        CreateWindowExW(0, L"static", L"Walk Radius:", WS_CHILD|WS_VISIBLE, x, y+2, 80, 18,
             parent, NULL, GetModuleHandle(NULL), NULL);
         hEdtRadius = CreateWindowExW(0, L"edit", L"10", WS_CHILD|WS_VISIBLE|WS_BORDER|ES_AUTOHSCROLL|ES_NUMBER,
             x+85, y, 50, 22, parent, (HMENU)9302, GetModuleHandle(NULL), NULL);
@@ -123,7 +124,7 @@ public:
 
     void UpdateUI() override {
         if (hChkEnabled) SendMessage(hChkEnabled, BM_SETCHECK, enabled ? BST_CHECKED : BST_UNCHECKED, 0);
-        if (hEdtRadius) { wchar_t b[32]; swprintf_s(b, L"%.0f", radius); SetWindowTextW(hEdtRadius, b); }
+        if (hEdtRadius) { wchar_t b[32]; swprintf_s(b, L"%.0f", walkRadius); SetWindowTextW(hEdtRadius, b); }
         if (hEdtCooldown) { wchar_t b[32]; swprintf_s(b, L"%d", cooldownMs); SetWindowTextW(hEdtCooldown, b); }
     }
 
@@ -131,7 +132,7 @@ public:
         if (id == 9301 && code == BN_CLICKED)
             enabled = (SendMessage(hChkEnabled, BM_GETCHECK, 0, 0) == BST_CHECKED);
         if (id == 9302 && code == EN_CHANGE) {
-            wchar_t b[32]; GetWindowTextW(hEdtRadius, b, 32); radius = (float)_wtof(b);
+            wchar_t b[32]; GetWindowTextW(hEdtRadius, b, 32); walkRadius = (float)_wtof(b);
         }
         if (id == 9303 && code == EN_CHANGE) {
             wchar_t b[32]; GetWindowTextW(hEdtCooldown, b, 32); cooldownMs = _wtoi(b);
@@ -143,21 +144,60 @@ private:
     HWND hChkEnabled = NULL, hEdtRadius = NULL, hEdtCooldown = NULL;
     DWORD lastLootTick = 0;
     DWORD lootingState = 0;
-    DWORD lootingStepTick = 0;
 
-    static DWORD GetCursorPtr(HANDLE hProc) {
-        DWORD gmPtr = 0; SIZE_T r = 0;
-        ReadProcessMemory(hProc, (LPCVOID)0x00D387AC, &gmPtr, 4, &r);
-        if (r != 4 || gmPtr <= 0x1000) return 0;
-        DWORD gm = 0;
-        ReadProcessMemory(hProc, (LPCVOID)(gmPtr + 0x14), &gm, 4, &r);
-        if (r != 4 || gm <= 0x1000) return 0;
-        DWORD cur = 0;
-        ReadProcessMemory(hProc, (LPCVOID)(gm + 0x123C), &cur, 4, &r);
-        return (r == 4) ? cur : 0;
+    // Convert game coordinates to client-area screen coordinates
+    // Warspear 2D top-down: player always centered, scale = pixels per game unit
+    static bool GameToClient(const GameContext& ctx, float gx, float gy, int& cx, int& cy) {
+        HWND w = ctx.gameWindow;
+        if (!w) return false;
+        RECT rc; GetClientRect(w, &rc);
+        int midX = (rc.right - rc.left) / 2;
+        int midY = (rc.bottom - rc.top) / 2;
+
+        float dx = gx - ctx.selfX;
+        float dy = gy - ctx.selfY;
+        float len = sqrtf(dx*dx + dy*dy);
+        if (len < 0.5f) { cx = midX; cy = midY; return true; }
+
+        cx = midX + (int)(dx * ctx.scale);
+        cy = midY + (int)(dy * ctx.scale);
+
+        if (cx < 5) cx = 5; if (cx > rc.right - 5) cx = rc.right - 5;
+        if (cy < 5) cy = 5; if (cy > rc.bottom - 5) cy = rc.bottom - 5;
+        return true;
     }
 
-    // Walk toward position (same as follower: cursor memory + walk flag + local Enter)
+    // Physical mouse click at client coordinates
+    static void ClickAtClient(HWND gw, int cx, int cy) {
+        if (!gw) return;
+        if (GetForegroundWindow() != gw || IsIconic(gw)) return;
+
+        // Force foreground
+        DWORD fgTid = GetWindowThreadProcessId(gw, NULL);
+        DWORD myTid = GetCurrentThreadId();
+        AttachThreadInput(myTid, fgTid, TRUE);
+        SetForegroundWindow(gw);
+        AttachThreadInput(myTid, fgTid, FALSE);
+        if (GetForegroundWindow() != gw) return;
+
+        // Convert client to screen coords and click
+        POINT pt = {cx, cy};
+        ClientToScreen(gw, &pt);
+        int sx = GetSystemMetrics(SM_CXSCREEN);
+        int sy = GetSystemMetrics(SM_CYSCREEN);
+        if (pt.x < 0 || pt.x >= sx || pt.y < 0 || pt.y >= sy) return;
+
+        INPUT in[3] = {};
+        in[0].type = INPUT_MOUSE;
+        in[0].mi.dx = (LONG)(pt.x * 65536.0 / sx);
+        in[0].mi.dy = (LONG)(pt.y * 65536.0 / sy);
+        in[0].mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
+        in[1].type = INPUT_MOUSE; in[1].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+        in[2].type = INPUT_MOUSE; in[2].mi.dwFlags = MOUSEEVENTF_LEFTUP;
+        SendInput(3, in, sizeof(INPUT));
+    }
+
+    // Walk toward position using cursor memory + walk flag + Enter
     void WalkToPosition(const GameContext& ctx, HWND gw, float gameX, float gameY) {
         extern void DebugLog(const char* fmt, ...);
 
@@ -178,41 +218,10 @@ private:
         DWORD walkFlag = 0x10;
         WriteProcessMemory(ctx.hProcess, (LPVOID)(curPtr + 0x7C), &walkFlag, 4, NULL);
 
-        DebugLog("[LOOT] Walk -> tile(%d,%d) raw(%d,%d)", tileX, tileY, rawX, rawY);
-
-        // Local Enter (same as follower)
+        DebugLog("[LOOT] Walk -> tile(%d,%d)", tileX, tileY);
         SendLocalEnter(gw);
     }
 
-    // Loot corpse when in range (cursor on corpse + HandleMoveOrAction + Enter)
-    void LootCorpse(const GameContext& ctx, HWND gw, DWORD curPtr, float corpseX, float corpseY) {
-        extern void DebugLog(const char* fmt, ...);
-        if (!curPtr) return;
-
-        WORD tileX = (WORD)((int)(corpseX / 24.0f));
-        WORD tileY = (WORD)((int)(corpseY / 24.0f));
-        if (tileX > 27) tileX = 27;
-        if (tileY > 27) tileY = 27;
-
-        int rawX = (int)tileX * 0x180000;
-        int rawY = (int)tileY * 0x180000;
-        WriteProcessMemory(ctx.hProcess, (LPVOID)(curPtr + 0x08), &tileX, 2, NULL);
-        WriteProcessMemory(ctx.hProcess, (LPVOID)(curPtr + 0x0A), &tileY, 2, NULL);
-        WriteProcessMemory(ctx.hProcess, (LPVOID)(curPtr + 0x10), &rawX, 4, NULL);
-        WriteProcessMemory(ctx.hProcess, (LPVOID)(curPtr + 0x14), &rawY, 4, NULL);
-
-        DebugLog("[LOOT] LootCorpse -> tile(%d,%d)", tileX, tileY);
-
-        // Call HandleMoveOrAction to make game process cursor position (detect corpse)
-        if (ctx.remoteHandleMoveOrAction && ctx.playerAddr > 0x1000) {
-            ctx.remoteHandleMoveOrAction(ctx.playerAddr);
-        }
-
-        Sleep(200);
-        SendLocalEnter(gw);
-    }
-
-    // Send Enter locally with foreground focus
     static void SendLocalEnter(HWND gw) {
         if (!gw) return;
         DWORD fgTid = GetWindowThreadProcessId(gw, NULL);
@@ -223,5 +232,17 @@ private:
         keybd_event(VK_RETURN, 0, 0, 0);
         Sleep(30);
         keybd_event(VK_RETURN, 0, KEYEVENTF_KEYUP, 0);
+    }
+
+    static DWORD GetCursorPtr(HANDLE hProc) {
+        DWORD gmPtr = 0; SIZE_T r = 0;
+        ReadProcessMemory(hProc, (LPCVOID)0x00D387AC, &gmPtr, 4, &r);
+        if (r != 4 || gmPtr <= 0x1000) return 0;
+        DWORD gm = 0;
+        ReadProcessMemory(hProc, (LPCVOID)(gmPtr + 0x14), &gm, 4, &r);
+        if (r != 4 || gm <= 0x1000) return 0;
+        DWORD cur = 0;
+        ReadProcessMemory(hProc, (LPCVOID)(gm + 0x123C), &cur, 4, &r);
+        return (r == 4) ? cur : 0;
     }
 };

@@ -29,27 +29,27 @@ public:
 
         DWORD now = ctx.tickCount;
 
-        // Verify target alive - just skip, don't clear targetAddr (let Targeter/sync handle it)
+        // WAIT for looter: if pending corpse is valid, don't attack — let looter walk and click
+        if (ctx.pendingCorpse && ctx.pendingCorpse->valid) {
+            return;
+        }
+
+        // Verify target alive
         int hp = ReadInt(ctx.hProcess, targetAddr + ENT_HP_OFFSET);
         if (hp <= 0) {
             if (!killedLogged) {
                 DebugLog("[ATTACK] Target killed!");
                 killedLogged = true;
 
-                // Save corpse position for looter (same as backup pending corpse system)
+                // Save corpse position for looter — use cached mob coords (more reliable than re-searching)
                 if (ctx.pendingCorpse) {
-                    for (auto& m : ctx.mobs) {
-                        if (m.objAddr == targetAddr) {
-                            ctx.pendingCorpse->objAddr = targetAddr;
-                            ctx.pendingCorpse->name = m.name;
-                            ctx.pendingCorpse->x = m.x;
-                            ctx.pendingCorpse->y = m.y;
-                            ctx.pendingCorpse->time = ctx.tickCount;
-                            ctx.pendingCorpse->valid = true;
-                            DebugLog("[ATTACK] Saved corpse: '%S' at (%.1f,%.1f)", m.name.c_str(), m.x, m.y);
-                            break;
-                        }
-                    }
+                    ctx.pendingCorpse->objAddr = targetAddr;
+                    ctx.pendingCorpse->name = targetName;
+                    ctx.pendingCorpse->x = targetGX;
+                    ctx.pendingCorpse->y = targetGY;
+                    ctx.pendingCorpse->time = ctx.tickCount;
+                    ctx.pendingCorpse->valid = true;
+                    DebugLog("[ATTACK] Saved corpse: '%S' at (%.1f,%.1f)", targetName.c_str(), targetGX, targetGY);
                 }
 
                 // Clear target so Targeter can select next mob
@@ -60,11 +60,12 @@ public:
         }
         killedLogged = false;
 
-        // Detect unattackable target: if HP unchanged after 5 attacks, skip
+        // Detect unattackable target: if HP unchanged after many attacks, skip
+        // Use higher threshold — damage may register in bursts, not every hit
         if (attackCount == 0) {
             lastCheckedHp = hp;
-        } else if (attackCount >= 5 && hp >= lastCheckedHp) {
-            DebugLog("[ATTACK] Target not taking damage (HP=%d), skipping...", hp);
+        } else if (attackCount >= 15 && hp >= lastCheckedHp) {
+            DebugLog("[ATTACK] Target not taking damage after %d attacks (HP=%d), skipping...", attackCount, hp);
             targetAddr = 0;
             attackState = 0;
             attackCount = 0;
@@ -84,6 +85,8 @@ public:
         for (auto& m : ctx.mobs) {
             if (m.objAddr == targetAddr) {
                 mobGX = m.x; mobGY = m.y;
+                targetName = m.name;
+                targetGX = m.x; targetGY = m.y;
                 found = true;
                 break;
             }
@@ -218,8 +221,10 @@ private:
     DWORD attackState = 0;
     DWORD attackStepTick = 0;
     bool  killedLogged = false;
-    int   attackCount = 0;      // how many Enter attacks sent
-    int   lastCheckedHp = 0;    // HP when we started attacking
+    int   attackCount = 0;
+    int   lastCheckedHp = 0;
+    std::wstring targetName;
+    float targetGX = 0, targetGY = 0;
 
     static constexpr DWORD GM_PTR_OFFSET        = 0x00D387AC;
     static constexpr DWORD GM_OFFSET            = 0x14;

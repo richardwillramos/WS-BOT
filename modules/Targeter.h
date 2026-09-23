@@ -43,7 +43,10 @@ public:
         }
 
         // Auto-target if no current target
+        // WAIT if pending corpse is valid — let looter finish first
         if (selectedAddr <= 0x1000) {
+            if (ctx.pendingCorpse && ctx.pendingCorpse->valid) return;
+
             float bestDist = 9999.0f;
             for (auto& m : ctx.mobs) {
                 if (m.hp <= 0) continue;

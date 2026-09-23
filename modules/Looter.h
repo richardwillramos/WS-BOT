@@ -19,7 +19,10 @@ public:
         DWORD now = ctx.tickCount;
         if (now - lastLootTick < (DWORD)cooldownMs) return;
 
-        // Check for corpses to loot
+        // Foreground safety
+        HWND gw = ctx.gameWindow;
+        if (!gw || GetForegroundWindow() != gw || IsIconic(gw)) return;
+
         if (ctx.corpses.empty()) { hasPendingCorpse = false; return; }
 
         auto& corpse = ctx.corpses[0];
@@ -28,55 +31,11 @@ public:
         float dist = sqrtf(dx*dx + dy*dy);
 
         if (dist > radius) {
-            // Walk toward corpse (use cursor + Enter approach)
-            // Write game coords to cursor, then press Enter
-            HWND gw = ctx.gameWindow;
-            if (!gw) return;
-
-            // Convert to cursor tile coords
-            WORD tileX = (WORD)((int)(corpse.x / 24.0f));
-            WORD tileY = (WORD)((int)(corpse.y / 24.0f));
-            if (tileX > 27) tileX = 27;
-            if (tileY > 27) tileY = 27;
-
-            // Get cursor address from game memory
-            DWORD gmPtr = 0; SIZE_T r = 0;
-            ReadProcessMemory(ctx.hProcess, (LPCVOID)0x00D387AC, &gmPtr, 4, &r);
-            if (gmPtr > 0x1000) {
-                DWORD gm = 0;
-                ReadProcessMemory(ctx.hProcess, (LPCVOID)(gmPtr + 0x14), &gm, 4, &r);
-                if (gm > 0x1000) {
-                    DWORD cur = 0;
-                    ReadProcessMemory(ctx.hProcess, (LPCVOID)(gm + 0x123C), &cur, 4, &r);
-                    if (cur > 0x1000) {
-                        WORD rawTileX = tileX;
-                        WORD rawTileY = tileY;
-                        WriteProcessMemory(ctx.hProcess, (LPVOID)(cur + 0x08), &rawTileX, 2, NULL);
-                        WriteProcessMemory(ctx.hProcess, (LPVOID)(cur + 0x0A), &rawTileY, 2, NULL);
-                        int rawX = (int)tileX * 0x180000;
-                        int rawY = (int)tileY * 0x180000;
-                        WriteProcessMemory(ctx.hProcess, (LPVOID)(cur + 0x10), &rawX, 4, NULL);
-                        WriteProcessMemory(ctx.hProcess, (LPVOID)(cur + 0x14), &rawY, 4, NULL);
-                    }
-                }
-            }
-
-            // Send Enter to walk
-            if (gw && IsWindow(gw)) {
-                UINT scan = MapVirtualKeyW(VK_RETURN, MAPVK_VK_TO_VSC);
-                LPARAM keyDown = 1 | ((LPARAM)scan << 16);
-                LPARAM keyUp = keyDown | (1LL << 30) | (1LL << 31);
-                PostMessageW(gw, WM_KEYDOWN, VK_RETURN, keyDown);
-                PostMessageW(gw, WM_KEYUP, VK_RETURN, keyUp);
-            }
             lastLootTick = now;
             return;
         }
 
-        // Close enough - write cursor to corpse tile and press Enter
-        HWND gw = ctx.gameWindow;
-        if (!gw) return;
-
+        // Write cursor to corpse tile
         WORD tileX = (WORD)((int)(corpse.x / 24.0f));
         WORD tileY = (WORD)((int)(corpse.y / 24.0f));
         if (tileX > 27) tileX = 27;
@@ -101,16 +60,8 @@ public:
             }
         }
 
-        Sleep(100);
-
-        // Press Enter to interact/loot
-        if (gw && IsWindow(gw)) {
-            UINT scan = MapVirtualKeyW(VK_RETURN, MAPVK_VK_TO_VSC);
-            LPARAM keyDown = 1 | ((LPARAM)scan << 16);
-            LPARAM keyUp = keyDown | (1LL << 30) | (1LL << 31);
-            PostMessageW(gw, WM_KEYDOWN, VK_RETURN, keyDown);
-            PostMessageW(gw, WM_KEYUP, VK_RETURN, keyUp);
-        }
+        // Use remote keybd_event (PostMessage doesn't reach DirectInput)
+        if (ctx.remoteSendEnter) ctx.remoteSendEnter();
 
         lastLootTick = now;
         lootCount++;

@@ -150,8 +150,8 @@ enum { MID_TARGETER=0, MID_ATTACKER, MID_HEALER, MID_FOLLOWER, MID_LOOTER, MID_E
 // Quick actions tab
 static HWND g_hQuickBtn[8] = {};
 static const wchar_t* QUICK_LABELS[] = {
-    L"Toggle Attack [F1]", L"Toggle Heal [F2]", L"Toggle Follow [F3]",
-    L"Toggle Loot [F4]", L"Toggle All ON", L"STOP ALL", L"Scale + [F5]", L"Scale - [F6]"
+    L"Toggle Attack [F1]", L"STOP ALL [F2]", L"Toggle Follow [F3]",
+    L"Toggle Loot [F4]", L"Toggle All ON", L"STOP ALL (button)", L"Scale + [F5]", L"Scale - [F6]"
 };
 enum { QID_ATK=0, QID_HEAL, QID_FOLLOW, QID_LOOT, QID_ALL, QID_STOP, QID_SCP, QID_SCN };
 
@@ -1127,8 +1127,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         int id = LOWORD(wParam);
 
         // Accordion module headers and settings
-        if ((id >= IDM_MOD_HEADER && id < IDM_MOD_HEADER + 7) ||
-            (id >= IDM_MOD_TOGGLE && id < IDM_MOD_TOGGLE + 70)) {
+        if ((id >= IDM_MOD_HEADER && id < IDM_MOD_HEADER + 6) ||
+            (id >= IDM_MOD_TOGGLE && id < IDM_MOD_TOGGLE + 60)) {
             AccordionHandleClick(id);
             break;
         }

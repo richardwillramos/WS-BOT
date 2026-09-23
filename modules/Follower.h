@@ -19,6 +19,10 @@ public:
         DWORD now = ctx.tickCount;
         if (now - lastFollowTick < (DWORD)cooldownMs) return;
 
+        // Foreground safety (same as backup)
+        HWND gw = ctx.gameWindow;
+        if (!gw || GetForegroundWindow() != gw || IsIconic(gw)) return;
+
         // Find target in player list
         bool found = false;
         float tx = 0, ty = 0;
@@ -31,7 +35,6 @@ public:
         }
 
         if (!found) {
-            // Try to find by name
             for (auto& p : ctx.players) {
                 if (p.name == targetName) {
                     targetAddr = p.objAddr;
@@ -44,9 +47,7 @@ public:
         }
 
         if (!found) {
-            if (!followPaused) {
-                followPaused = true;
-            }
+            if (!followPaused) followPaused = true;
             return;
         }
 
@@ -56,13 +57,12 @@ public:
 
         if (dist < desiredDistance) return;
 
-        // Walk toward target using cursor + Enter
+        // Write cursor position to game memory (same as backup MoveToTile)
         WORD tileX = (WORD)((int)(tx / 24.0f));
         WORD tileY = (WORD)((int)(ty / 24.0f));
         if (tileX > 27) tileX = 27;
         if (tileY > 27) tileY = 27;
 
-        // Get cursor address
         DWORD gmPtr = 0; SIZE_T r = 0;
         ReadProcessMemory(ctx.hProcess, (LPCVOID)0x00D387AC, &gmPtr, 4, &r);
         if (gmPtr > 0x1000) {
@@ -72,10 +72,10 @@ public:
                 DWORD cur = 0;
                 ReadProcessMemory(ctx.hProcess, (LPCVOID)(gm + 0x123C), &cur, 4, &r);
                 if (cur > 0x1000) {
-                    WriteProcessMemory(ctx.hProcess, (LPVOID)(cur + 0x08), &tileX, 2, NULL);
-                    WriteProcessMemory(ctx.hProcess, (LPVOID)(cur + 0x0A), &tileY, 2, NULL);
                     int rawX = (int)tileX * 0x180000;
                     int rawY = (int)tileY * 0x180000;
+                    WriteProcessMemory(ctx.hProcess, (LPVOID)(cur + 0x08), &tileX, 2, NULL);
+                    WriteProcessMemory(ctx.hProcess, (LPVOID)(cur + 0x0A), &tileY, 2, NULL);
                     WriteProcessMemory(ctx.hProcess, (LPVOID)(cur + 0x10), &rawX, 4, NULL);
                     WriteProcessMemory(ctx.hProcess, (LPVOID)(cur + 0x14), &rawY, 4, NULL);
                     DWORD walkFlag = 0x10;
@@ -84,6 +84,7 @@ public:
             }
         }
 
+        // Send Enter via remote keybd_event (more reliable than PostMessage for DirectInput)
         if (ctx.remoteSendEnter) ctx.remoteSendEnter();
         lastFollowTick = now;
     }

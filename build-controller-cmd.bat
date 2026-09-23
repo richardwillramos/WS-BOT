@@ -9,7 +9,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-cd /d "F:\WS\BOT-CE\warspear-botv1.4"
+cd /d "C:\Users\Admin\Documents\GitHub\WS-BOT"
 
 if errorlevel 1 (
     echo ERRO: Nao foi possivel acessar a pasta do projeto.

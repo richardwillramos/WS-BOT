@@ -70,8 +70,8 @@ GM + 0x40                  →  player (LocalPlayer)
 | Offset | Tamanho | Descrição |
 |--------|---------|-----------|
 | `+0x00` | DWORD | VTable (identificador de classe) |
-| `+0x10` | DWORD | Raw X (dividir por 65536.0f) |
-| `+0x14` | DWORD | Raw Y (dividir por 65536.0f) |
+| `+0x10` | WORD | Raw X (ler como short, valor direto) |
+| `+0x14` | WORD | Raw Y (ler como short, valor direto) |
 | `+0x58` | DWORD | Ponteiro para nome (UTF-16LE) |
 | `+0x060` | DWORD | Tamanho do nome |
 | `+0x090` | DWORD | Tipo (1=player, 2=outro) |
@@ -162,7 +162,7 @@ O cursor do jogo é acessível via `GM + 0x123C`:
 
 - Zona size: 28 tiles (0-27)
 - Conversão tile→raw (cursor): `rawX = tileX * 0x180000`
-- Entity raw: DWORD, dividir por `65536.0f` para obter game coords
+- Entity raw: WORD (2 bytes), ler como `short`, valor direto (sem divisão)
 
 ### Funções Relevantes
 

@@ -18,7 +18,9 @@ struct GameContext {
     DWORD playerAddr, gmAddr;
     HWND  gameWindow;
     DWORD tickCount;
+    float scale = 3.5f;
     void  (*remoteSendEnter)() = nullptr;
+    void  (*remoteHandleMoveOrAction)(DWORD localPlayerAddr) = nullptr;
 };
 
 class IModule {

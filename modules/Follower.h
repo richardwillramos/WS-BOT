@@ -13,6 +13,7 @@ public:
     void Stop() override  { lastFollowTick = 0; followPaused = false; targetAddr = 0; }
 
     void Tick(const GameContext& ctx) override {
+        extern void DebugLog(const char* fmt, ...);
         if (!enabled || ctx.hProcess == NULL) return;
         if (targetAddr <= 0x1000) return;
 
@@ -63,6 +64,8 @@ public:
         if (tileX > 27) tileX = 27;
         if (tileY > 27) tileY = 27;
 
+        DebugLog("[FOLLOW] Following '%S' dist=%.1f -> tile(%d,%d)", targetName.c_str(), dist, tileX, tileY);
+
         DWORD gmPtr = 0; SIZE_T r = 0;
         ReadProcessMemory(ctx.hProcess, (LPCVOID)0x00D387AC, &gmPtr, 4, &r);
         if (gmPtr > 0x1000) {
@@ -84,8 +87,17 @@ public:
             }
         }
 
-        // Send Enter via remote keybd_event (more reliable than PostMessage for DirectInput)
-        if (ctx.remoteSendEnter) ctx.remoteSendEnter();
+        // Send Enter locally (backup approach - keybd_event from controller process)
+        // The backup does AttachThreadInput + SetForegroundWindow + local keybd_event
+        DWORD fgTid = GetWindowThreadProcessId(gw, NULL);
+        DWORD myTid = GetCurrentThreadId();
+        AttachThreadInput(myTid, fgTid, TRUE);
+        SetForegroundWindow(gw);
+        AttachThreadInput(myTid, fgTid, FALSE);
+        keybd_event(VK_RETURN, 0, 0, 0);
+        Sleep(30);
+        keybd_event(VK_RETURN, 0, KEYEVENTF_KEYUP, 0);
+
         lastFollowTick = now;
     }
 

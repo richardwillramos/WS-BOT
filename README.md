@@ -11,7 +11,7 @@ Bot de automação para Warspear Online (cliente 32-bit, private server). Funcio
 │  warspear-controller.exe        │
 │  (GUI externa)                  │
 │                                 │
-│  Aba Config: módulos accordion  │
+│  Aba Config: TreeView (árvore)  │
 │  Aba Quick: atalhos ON/OFF      │
 │  Aba Connection: conectar/jogador│
 │  Status bar                     │
@@ -32,7 +32,7 @@ Bot de automação para Warspear Online (cliente 32-bit, private server). Funcio
 |--------|-----------|
 | **Targeter** | Seleciona mob mais próximo, mantém alvo |
 | **Attacker** | Ataca alvo via cursor memory writes + Enter remoto |
-| **Healer** | Cura o jogador quando HP cai abaixo do threshold |
+| **Healer** | Cura player selecionado via target (timer configurável) |
 | **Follower** | Segue um player específico (seletor de lista na UI) |
 | **Looter** | Coleta corpos de mobs mortos |
 | **Extra** | Anti-AFK, auto-revive, auto-sell, auto-repair |
@@ -44,7 +44,7 @@ Bot de automação para Warspear Online (cliente 32-bit, private server). Funcio
 ### Cadeia de Ponteiros Principal
 
 ```
-warspear.exe + 0x009387AC  →  sysInstance (System Instance)
+warspear.exe + 0x00D387AC  →  sysInstance (System Instance)
 sysInstance  + 0x14        →  GM (GameManager)
 GM + 0x40                  →  player (LocalPlayer)
 ```
@@ -96,15 +96,18 @@ GM + 0x40                  →  player (LocalPlayer)
 
 ### Cursor / Ações
 
-O cursor do jogo é acessível via `player + 0x123C`:
+O cursor do jogo é acessível via `GM + 0x123C`:
 
 | Offset | Tamanho | Descrição |
 |--------|---------|-----------|
-| `+0x08` | WORD | Cursor X (tiles, WORD) |
-| `+0x0A` | WORD | Cursor Y (tiles, WORD) |
-| `+0x10` | DWORD | Raw X (escrita em memória para mover cursor) |
-| `+0x14` | DWORD | Raw Y (escrita em memória para mover cursor) |
+| `+0x08` | WORD | Cursor X (tiles) |
+| `+0x0A` | WORD | Cursor Y (tiles) |
+| `+0x10` | DWORD | Raw X (escrita para mover cursor) |
+| `+0x14` | DWORD | Raw Y (escrita para mover cursor) |
+| `+0x7C` | DWORD | Walk flag (0x10 = walk) |
 | `+0x7C` | BYTE | Cursor action flag |
+
+**Walk flag:** Escrever `0x10` em `cursor+0x7C` faz o personagem andar até a posição do cursor.
 
 **Cursor action flags:**
 
@@ -114,7 +117,11 @@ O cursor do jogo é acessível via `player + 0x123C`:
 | `13` | MOVE (cursor em posição válida) |
 | `15` | NONE (cursor em posição inválida) |
 
-**Ataque via cursor memory write:** As coordenadas raw do mob são escritas diretamente em `cursor+0x10` e `cursor+0x14` via `WriteProcessMemory`, sem usar setas do teclado.
+**Como funciona o cursor:**
+1. Escrever tile X/Y em `cursor+0x08` e `cursor+0x0A` (WORD)
+2. Escrever raw X/Y em `cursor+0x10` e `cursor+0x14` (DWORD)
+3. Escrever walk flag `0x10` em `cursor+0x7C` para movimentar
+4. Usar `CreateRemoteThread` + `keybd_event(VK_RETURN)` para confirmar
 
 ### Árvore de Entidades (BST)
 
@@ -138,9 +145,8 @@ O cursor do jogo é acessível via `player + 0x123C`:
 ### Coordenadas do Mundo
 
 - Zona size: 28 tiles (0-27)
-- Conversão world→tile: `tileX = rawX / 1572864` (raw / 65536 / 24)
-- Conversão raw→world: `worldX = rawX / 65536`
-- Conversão world→tile: `tileX = worldX / 24`
+- Conversão tile→raw (cursor): `rawX = tileX * 0x180000`
+- Entity raw: ler como `short` (2 bytes), valor direto (sem divisão)
 
 ### Funções Relevantes
 
@@ -168,7 +174,7 @@ O Warspear Online usa DirectInput/raw input — `PostMessage` com `WM_KEYDOWN` n
 ```
 WS-BOT/
 ├── controller/
-│   └── main.cpp                ← Controlador GUI (accordion UI, 6 módulos)
+│   └── main.cpp                ← Controlador GUI (TreeView UI, 6 módulos)
 │
 ├── include/
 │   ├── IModule.h               ← Interface dos módulos + GameContext
@@ -178,14 +184,12 @@ WS-BOT/
 ├── modules/
 │   ├── Targeter.h              ← Seleção de alvo
 │   ├── Attacker.h              ← Ataque via cursor memory + remote keybd_event
-│   ├── Healer.h                ← Auto-cura
+│   ├── Healer.h                ← Cura player selecionado (target + timer)
 │   ├── Looter.h                ← Auto-loot
 │   ├── Follower.h              ← Seguir player específico (cursor memory + Enter)
 │   └── Extra.h                 ← Anti-AFK, auto-revive, auto-sell, auto-repair
 │
-├── dllmain.cpp                 ← DLL (arrow-key nav via shared memory, referência)
 ├── build-controller-local.bat  ← Script de compilação do controller
-├── build-dll.bat               ← Script de compilação da DLL
 └── README.md
 ```
 
@@ -220,10 +224,22 @@ build-controller-local.bat
 1. Abrir Warspear Online (deixa o jogo carregado)
 2. Abrir `warspear-controller.exe`
 3. Aba **Connection**: selecionar `warspear.exe` na lista e clicar **CONNECT**
-4. Aba **Config**: expandir módulos e ativar os desejados
-5. **Follower**: clicar em "Target" para selecionar o player a seguir da lista de nearby
-6. Aba **Quick**: atalhos ON/OFF para Attack, Heal, Follow
-7. O bot começa a trabalhar automaticamente
+4. Aba **Config**: expandir módulos (+) e ativar os desejados
+5. **Healer**: clicar em "Target" para selecionar o player a curar
+6. **Follower**: clicar em "Target" para selecionar o player a seguir
+7. Aba **Quick**: atalhos ON/OFF para Attack, Heal, Follow
+8. O bot começa a trabalhar automaticamente
+
+### Atalhos de Teclado
+
+| Tecla | Ação |
+|-------|------|
+| F1 | Toggle Attack |
+| F2 | STOP ALL (panic) |
+| F3 | Toggle Follow |
+| F4 | Toggle Loot |
+| F5 | Scale + |
+| F6 | Scale - |
 
 ---
 
@@ -239,15 +255,25 @@ Todos os timers verificam se o jogo está em foreground antes de agir:
 
 O bot suporta múltiplas instâncias do Warspear Online. Cada controller conecta a um PID diferente.
 
-### Accordion UI (6 módulos)
+### UI (TreeView)
 
-A UI principal usa um accordion com 6 módulos (toggle + config inline):
-- **Targeter**: toggle + retarget + maxDistance
-- **Attacker**: toggle + cooldown
-- **Healer**: toggle + minHp% + healKey
-- **Follower**: toggle + target picker (lista de players nearby) + desiredDistance + maxDistance
-- **Looter**: toggle + radius
-- **Extra**: toggle + antiAFK + autoRevive + autoSell + autoRepair
+A UI principal usa um TreeView (árvore hierárquica) com 6 módulos:
+- **Targeter**: Status, Retarget, Max distance
+- **Attacker**: Status, Cooldown, Skills
+- **Healer**: Status, Target (seletor de player), Cooldown, Heal key, Min HP filter (ON/OFF), Min HP%
+- **Follower**: Status, Target (seletor de player), Distance, Max distance
+- **Looter**: Status, Radius, Cooldown
+- **Extra**: Anti AFK, Auto Revive, Auto Sell, Auto Repair
+
+Cada módulo é um nó pai que expande/recolhe com "+". Cliques nos filhos alternam valores ou abrem input dialogs.
+
+### Healer - Funcionamento
+
+- **Target**: seleciona um player da lista de nearby
+- **Cooldown**: tempo em ms entre cada cura
+- **Heal Key**: tecla da skill de cura (1-9)
+- **Min HP filter OFF**: cura no timer sem checar HP
+- **Min HP filter ON**: só cura se HP do target abaixo do %
 
 ### DLL (Legacy)
 

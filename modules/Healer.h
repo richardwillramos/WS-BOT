@@ -13,6 +13,7 @@ public:
     void Stop() override  { lastHealTick = 0; }
 
     void Tick(const GameContext& ctx) override {
+        extern void DebugLog(const char* fmt, ...);
         if (!enabled || ctx.hProcess == NULL) return;
         if (targetAddr <= 0x1000) return;
 
@@ -36,6 +37,8 @@ public:
         }
 
         if (healKeyBind == 0) return;
+
+        DebugLog("[HEAL] Healing target addr=0x%08X key=%c", targetAddr, (char)healKeyBind);
 
         INPUT inputs[2] = {};
         inputs[0].type = INPUT_KEYBOARD;

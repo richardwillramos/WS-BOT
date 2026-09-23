@@ -1,1 +1,1 @@
-[INIT] sys=011BAEB8 gm=0E2DB010 lp=0DF6B958
+[INIT] DLL loaded, attack=0 follow=0

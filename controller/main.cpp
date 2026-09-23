@@ -133,6 +133,12 @@ static float  g_selfX = 0, g_selfY = 0;
 static float  g_scale = 3.5f;
 static DWORD  g_playerAddr = 0, g_gmAddr = 0;
 
+// Stats tracking
+static int    g_killCount = 0;
+static int    g_lootCount = 0;
+static DWORD  g_lastStatsTick = 0;
+static std::wstring g_lastLootName;
+
 // Tab system
 enum TabID { TAB_CONFIG = 0, TAB_QUICK = 1, TAB_CONN = 2 };
 static int g_currentTab = TAB_CONFIG;
@@ -580,6 +586,38 @@ void RemoteSendEnter() {
 }
 
 // ============================================================
+// Remote game function calls (for Attacker)
+// ============================================================
+
+// Call HandleMoveOrAction (0x00A3F480) __thiscall(localPlayer, 0) in the game process
+// This forces the game to process cursor position and update +0x7C action flag
+void RemoteHandleMoveOrAction(DWORD localPlayerAddr) {
+    if (!g_hProcess || localPlayerAddr <= 0x1000) return;
+
+    // Shellcode:
+    //   mov ecx, [esp+4]       ; ecx = localPlayer (thiscall)
+    //   push 0                 ; param1 = 0
+    //   call HandleMoveOrAction
+    //   ret 4                  ; clean lpParameter from CreateRemoteThread
+    constexpr DWORD FN_HMOA = 0x00A3F480;
+    BYTE sc[16];
+    int i = 0;
+    sc[i++] = 0x8B; sc[i++] = 0x4C; sc[i++] = 0x24; sc[i++] = 0x04;  // mov ecx, [esp+4]
+    sc[i++] = 0x6A; sc[i++] = 0x00;                                    // push 0
+    sc[i++] = 0xB8;                                                    // mov eax, imm32
+    *(DWORD*)(sc + i) = FN_HMOA; i += 4;
+    sc[i++] = 0xFF; sc[i++] = 0xD0;                                    // call eax
+    sc[i++] = 0xC2; sc[i++] = 0x04; sc[i++] = 0x00;                   // ret 4
+
+    LPVOID remote = VirtualAllocEx(g_hProcess, NULL, i, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!remote) return;
+    WriteProcessMemory(g_hProcess, remote, sc, i, NULL);
+    HANDLE ht = CreateRemoteThread(g_hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)remote, (LPVOID)localPlayerAddr, 0, NULL);
+    if (ht) { WaitForSingleObject(ht, 1000); CloseHandle(ht); }
+    VirtualFreeEx(g_hProcess, remote, 0, MEM_RELEASE);
+}
+
+// ============================================================
 // Build GameContext
 // ============================================================
 GameContext BuildContext() {
@@ -591,6 +629,7 @@ GameContext BuildContext() {
     ctx.gameWindow = FindGameWindow();
     ctx.tickCount = GetTickCount();
     ctx.remoteSendEnter = RemoteSendEnter;
+    ctx.remoteHandleMoveOrAction = RemoteHandleMoveOrAction;
 
     if (g_playerAddr > 0x1000) {
         ctx.selfHp = Read<int>(g_playerAddr + Game::ENT_HP);
@@ -695,6 +734,63 @@ int ShowInputInt(HWND parent, const wchar_t* title, int current) {
         if (!IsDialogMessageW(hDlg, &msg)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
     }
     return g_inputResult;
+}
+
+// String input dialog
+static wchar_t g_inputStrBuf[256] = {};
+static HWND g_inputStrParent = NULL;
+static LRESULT CALLBACK InputStrDlgProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    switch (m) {
+    case WM_CREATE: {
+        CreateWindowExW(0, L"static", L"", WS_CHILD|WS_VISIBLE,
+            10, 13, 300, 18, h, NULL, g_hInst, NULL);
+        HWND hEd = CreateWindowExW(0, L"edit", L"",
+            WS_CHILD|WS_VISIBLE|WS_BORDER|ES_AUTOHSCROLL,
+            10, 10, 240, 24, h, (HMENU)1001, g_hInst, NULL);
+        SendMessageW(hEd, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+        SetWindowTextW(hEd, g_inputStrBuf);
+        SetFocus(hEd);
+        CreateWindowExW(0, L"button", L"OK", WS_CHILD|WS_VISIBLE|BS_DEFPUSHBUTTON,
+            260, 10, 50, 24, h, (HMENU)1002, g_hInst, NULL);
+        break;
+    }
+    case WM_COMMAND:
+        if (LOWORD(w) == 1002) {
+            GetWindowTextW(GetDlgItem(h, 1001), g_inputStrBuf, 256);
+            DestroyWindow(h);
+        }
+        break;
+    case WM_DESTROY:
+        if (g_inputStrParent) { EnableWindow(g_inputStrParent, TRUE); SetForegroundWindow(g_inputStrParent); }
+        break;
+    }
+    return DefWindowProcW(h, m, w, l);
+}
+
+void ShowInputString(HWND parent, const wchar_t* title, const wchar_t* current, wchar_t* out, int maxLen) {
+    wcscpy_s(g_inputStrBuf, current ? current : L"");
+    g_inputStrParent = parent;
+
+    WNDCLASSEXW wc{}; wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = InputStrDlgProc;
+    wc.hInstance = g_hInst;
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+    wc.lpszClassName = L"InputStrDlg";
+    RegisterClassExW(&wc);
+
+    EnableWindow(parent, FALSE);
+    HWND hDlg = CreateWindowExW(WS_EX_DLGMODALFRAME, L"InputStrDlg", title,
+        WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU,
+        CW_USEDEFAULT, CW_USEDEFAULT, 330, 70,
+        parent ? parent : g_hWnd, NULL, g_hInst, NULL);
+    ShowWindow(hDlg, SW_SHOW); UpdateWindow(hDlg);
+    MSG msg{};
+    while (GetMessageW(&msg, NULL, 0, 0)) {
+        if (!IsWindow(hDlg)) break;
+        if (!IsDialogMessageW(hDlg, &msg)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
+    }
+    wcscpy_s(out, maxLen, g_inputStrBuf);
 }
 
 // ============================================================
@@ -819,6 +915,14 @@ void RefreshTree() {
     TreeSetItemText(MID_TARGETER, 1, G->targeter.retargetOnNearby ? L"Retarget on nearby: ON" : L"Retarget on nearby: OFF");
     swprintf(b,256,L"Max distance: %d", (int)G->targeter.maxDistance);
     TreeSetItemText(MID_TARGETER, 2, b);
+    { const wchar_t* fm[] = { L"All", L"By Name", L"By Distance" };
+    swprintf(b,256,L"Filter: %s", fm[G->targeter.filterMode % 3]);
+    TreeSetItemText(MID_TARGETER, 3, b); }
+    if (G->targeter.filterMode == 1 && !G->targeter.targetMobName.empty())
+        swprintf(b,256,L"Mob Name: %s", G->targeter.targetMobName.c_str());
+    else
+        swprintf(b,256,L"Mob Name: -");
+    TreeSetItemText(MID_TARGETER, 4, b);
 
     TreeSetItemText(MID_ATTACKER, 0, G->attacker.enabled ? L"Status: true" : L"Status: false");
     swprintf(b,256,L"Cooldown: %d ms", G->attacker.globalCooldownMs);
@@ -880,6 +984,7 @@ void TreeHandleClick(NMTREEVIEWW* ntv) {
         case MID_TARGETER:
             if (td.subId == 0) G->targeter.enabled = !G->targeter.enabled;
             else if (td.subId == 1) G->targeter.retargetOnNearby = !G->targeter.retargetOnNearby;
+            else if (td.subId == 3) G->targeter.filterMode = (G->targeter.filterMode + 1) % 3;
             break;
         case MID_ATTACKER:
             if (td.subId == 0) G->attacker.enabled = !G->attacker.enabled;
@@ -909,6 +1014,12 @@ void TreeHandleClick(NMTREEVIEWW* ntv) {
         switch (td.module) {
         case MID_TARGETER:
             if (td.subId == 2) { v = ShowInputInt(g_hWnd, L"Max Distance", (int)G->targeter.maxDistance); G->targeter.maxDistance = (float)v; }
+            else if (td.subId == 4) {
+                // Show input dialog for mob name
+                wchar_t buf[256] = {};
+                ShowInputString(g_hWnd, L"Mob Name (partial match)", G->targeter.targetMobName.c_str(), buf, 256);
+                G->targeter.targetMobName = buf;
+            }
             break;
         case MID_ATTACKER:
             if (td.subId == 1) { v = ShowInputInt(g_hWnd, L"Cooldown (ms)", G->attacker.globalCooldownMs); G->attacker.globalCooldownMs = v; }
@@ -1064,6 +1175,10 @@ void CreateConfigPanel(HWND parent) {
     g_hTreeChild[MID_TARGETER][g_treeChildCount[MID_TARGETER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_TARGETER], L"Retarget on nearby: OFF", idx); }
     { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_TARGETER, TREE_VALUE, 2});
     g_hTreeChild[MID_TARGETER][g_treeChildCount[MID_TARGETER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_TARGETER], L"Max distance: 30", idx); }
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_TARGETER, TREE_TOGGLE, 3});
+    g_hTreeChild[MID_TARGETER][g_treeChildCount[MID_TARGETER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_TARGETER], L"Filter: All", idx); }
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_TARGETER, TREE_VALUE, 4});
+    g_hTreeChild[MID_TARGETER][g_treeChildCount[MID_TARGETER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_TARGETER], L"Mob Name: -", idx); }
 
     // Attacker
     g_hTreeParent[MID_ATTACKER] = TreeAddItem(g_hTree, TVI_ROOT, MOD_NAMES[MID_ATTACKER], -1);
@@ -1232,6 +1347,19 @@ void UpdateUI() {
         G->attacker.targetAddr = G->targeter.selectedAddr;
     else if (G->targeter.enabled)
         G->attacker.targetAddr = 0;
+
+    // Periodic stats (every 10 seconds)
+    DWORD now = GetTickCount();
+    if (now - g_lastStatsTick > 10000) {
+        g_lastStatsTick = now;
+        DebugLog("[STATS] ====================================");
+        DebugLog("[STATS] Position: (%.1f, %.1f) | Mobs: %d | Players: %d", g_selfX, g_selfY, (int)G->cachedMobs.size(), (int)G->cachedPlayers.size());
+        DebugLog("[STATS] Target: 0x%08X | Follower: 0x%08X", G->attacker.targetAddr, G->follower.targetAddr);
+        DebugLog("[STATS] Corpses: %d | Loots: %d", (int)G->cachedCorpses.size(), G->looter.lootCount);
+        DebugLog("[STATS] Modules: T=%d A=%d H=%d F=%d L=%d",
+            G->targeter.enabled, G->attacker.enabled, G->healer.enabled, G->follower.enabled, G->looter.enabled);
+        DebugLog("[STATS] ====================================");
+    }
 }
 
 // ============================================================

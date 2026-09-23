@@ -112,6 +112,8 @@ struct BotState {
     IModule* activeModule = nullptr;
     BotCmd*  pBotCmd = nullptr;
     HANDLE   hSharedMem = NULL;
+
+    GameContext::PendingCorpse pendingCorpse;
 };
 
 static BotState* G = nullptr;
@@ -630,6 +632,7 @@ GameContext BuildContext() {
     ctx.tickCount = GetTickCount();
     ctx.remoteSendEnter = RemoteSendEnter;
     ctx.remoteHandleMoveOrAction = RemoteHandleMoveOrAction;
+    ctx.pendingCorpse = &G->pendingCorpse;
 
     if (g_playerAddr > 0x1000) {
         ctx.selfHp = Read<int>(g_playerAddr + Game::ENT_HP);

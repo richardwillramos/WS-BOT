@@ -32,11 +32,30 @@ public:
         // Verify target alive - just skip, don't clear targetAddr (let Targeter/sync handle it)
         int hp = ReadInt(ctx.hProcess, targetAddr + ENT_HP_OFFSET);
         if (hp <= 0) {
-            extern void DebugLog(const char* fmt, ...);
-            DebugLog("[ATTACK] Target killed!");
+            if (!killedLogged) {
+                DebugLog("[ATTACK] Target killed!");
+                killedLogged = true;
+
+                // Save corpse position for looter (same as backup pending corpse system)
+                if (ctx.pendingCorpse) {
+                    for (auto& m : ctx.mobs) {
+                        if (m.objAddr == targetAddr) {
+                            ctx.pendingCorpse->objAddr = targetAddr;
+                            ctx.pendingCorpse->name = m.name;
+                            ctx.pendingCorpse->x = m.x;
+                            ctx.pendingCorpse->y = m.y;
+                            ctx.pendingCorpse->time = ctx.tickCount;
+                            ctx.pendingCorpse->valid = true;
+                            DebugLog("[ATTACK] Saved corpse: '%S' at (%.1f,%.1f)", m.name.c_str(), m.x, m.y);
+                            break;
+                        }
+                    }
+                }
+            }
             attackState = 0;
             return;
         }
+        killedLogged = false;
 
         HWND gw = ctx.gameWindow;
         if (!gw || GetForegroundWindow() != gw || IsIconic(gw)) return;
@@ -183,6 +202,7 @@ private:
     DWORD lastAttackTick = 0;
     DWORD attackState = 0;
     DWORD attackStepTick = 0;
+    bool  killedLogged = false;
 
     static constexpr DWORD GM_PTR_OFFSET        = 0x00D387AC;
     static constexpr DWORD GM_OFFSET            = 0x14;

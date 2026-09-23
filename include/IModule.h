@@ -21,6 +21,16 @@ struct GameContext {
     float scale = 3.5f;
     void  (*remoteSendEnter)() = nullptr;
     void  (*remoteHandleMoveOrAction)(DWORD localPlayerAddr) = nullptr;
+
+    // Pointer to shared pending corpse (owned by BotState, visible to all modules)
+    struct PendingCorpse {
+        DWORD objAddr = 0;
+        std::wstring name;
+        float x = 0, y = 0;
+        DWORD time = 0;
+        bool valid = false;
+    };
+    PendingCorpse* pendingCorpse = nullptr;
 };
 
 class IModule {

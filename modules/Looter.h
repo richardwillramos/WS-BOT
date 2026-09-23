@@ -23,59 +23,67 @@ public:
         HWND gw = ctx.gameWindow;
         if (!gw || GetForegroundWindow() != gw || IsIconic(gw)) return;
 
-        if (ctx.corpses.empty()) { lootingState = 0; return; }
+        // Find corpse to loot: first try tree corpses, then pending corpse from attacker
+        std::wstring corpseName;
+        float corpseX = 0, corpseY = 0;
+        bool hasCorpse = false;
 
-        auto& corpse = ctx.corpses[0];
-        float dx = corpse.x - ctx.selfX;
-        float dy = corpse.y - ctx.selfY;
+        if (!ctx.corpses.empty()) {
+            // Tree-based corpse (some servers keep dead mobs in tree)
+            auto& c = ctx.corpses[0];
+            corpseName = c.name;
+            corpseX = c.x;
+            corpseY = c.y;
+            hasCorpse = true;
+        } else if (ctx.pendingCorpse && ctx.pendingCorpse->valid) {
+            // Pending corpse (saved by attacker when mob died)
+            corpseName = ctx.pendingCorpse->name;
+            corpseX = ctx.pendingCorpse->x;
+            corpseY = ctx.pendingCorpse->y;
+            hasCorpse = true;
+
+            // Invalidate if too old (15 seconds)
+            if (now - ctx.pendingCorpse->time > 15000) {
+                ctx.pendingCorpse->valid = false;
+                hasCorpse = false;
+                DebugLog("[LOOT] Pending corpse expired");
+            }
+        }
+
+        if (!hasCorpse) { lootingState = 0; return; }
+
+        float dx = corpseX - ctx.selfX;
+        float dy = corpseY - ctx.selfY;
         float dist = sqrtf(dx*dx + dy*dy);
 
         // Get cursor pointer for writing
         DWORD curPtr = GetCursorPtr(ctx.hProcess);
 
-        switch (lootingState) {
-        case 0: // Check distance
-            DebugLog("[LOOT] Corpse: %S dist=%.1f radius=%.0f", corpse.name.c_str(), dist, radius);
-
-            if (dist > radius) {
-                // Walk toward corpse (same as follower movement)
-                WalkToPosition(ctx, gw, corpse.x, corpse.y);
-                lootingState = 1; // wait for walk
-                lootingStepTick = now;
-            } else {
-                // Close enough, loot directly
-                LootCorpse(ctx, gw, curPtr, corpse.x, corpse.y);
-                lootingState = 2;
-                lootingStepTick = now;
-            }
-            break;
-
-        case 1: // Waiting for walk to complete
-            if (now - lootingStepTick < 800) break;
-            lootingState = 0; // re-check distance next tick
-            break;
-
-        case 2: // Loot done, cooldown
-            if (now - lootingStepTick < 400) break;
-            lootingState = 0;
+        if (dist > radius) {
+            // Walk toward corpse — call every tick, character walks incrementally
+            WalkToPosition(ctx, gw, corpseX, corpseY);
+        } else {
+            // Close enough, loot directly
+            LootCorpse(ctx, gw, curPtr, corpseX, corpseY);
             lastLootTick = now;
             lootCount++;
-            DebugLog("[LOOT] Looted '%S' #%d", corpse.name.c_str(), lootCount);
-            break;
+            DebugLog("[LOOT] Looted '%S' #%d", corpseName.c_str(), lootCount);
+            // Invalidate pending corpse after looting
+            if (ctx.pendingCorpse) ctx.pendingCorpse->valid = false;
         }
     }
 
     // Config
     bool  enabled = false;
-    float radius = 10.0f;
-    int   cooldownMs = 1200;
+    float radius = 9999.0f;
+    int   cooldownMs = 500;
     int   lootCount = 0;
 
     void LoadConfig(const wchar_t* path) override {
         wchar_t buf[256];
         GetPrivateProfileStringW(L"Looter", L"Enabled", L"0", buf, 256, path);
         enabled = (buf[0] == L'1');
-        GetPrivateProfileStringW(L"Looter", L"Radius", L"10", buf, 256, path);
+        GetPrivateProfileStringW(L"Looter", L"Radius", L"20", buf, 256, path);
         radius = (float)_wtof(buf);
         GetPrivateProfileStringW(L"Looter", L"Cooldown", L"1200", buf, 256, path);
         cooldownMs = _wtoi(buf);
@@ -151,6 +159,8 @@ private:
 
     // Walk toward position (same as follower: cursor memory + walk flag + local Enter)
     void WalkToPosition(const GameContext& ctx, HWND gw, float gameX, float gameY) {
+        extern void DebugLog(const char* fmt, ...);
+
         WORD tileX = (WORD)((int)(gameX / 24.0f));
         WORD tileY = (WORD)((int)(gameY / 24.0f));
         if (tileX > 27) tileX = 27;
@@ -168,12 +178,15 @@ private:
         DWORD walkFlag = 0x10;
         WriteProcessMemory(ctx.hProcess, (LPVOID)(curPtr + 0x7C), &walkFlag, 4, NULL);
 
+        DebugLog("[LOOT] Walk -> tile(%d,%d) raw(%d,%d)", tileX, tileY, rawX, rawY);
+
         // Local Enter (same as follower)
         SendLocalEnter(gw);
     }
 
     // Loot corpse when in range (cursor on corpse + HandleMoveOrAction + Enter)
     void LootCorpse(const GameContext& ctx, HWND gw, DWORD curPtr, float corpseX, float corpseY) {
+        extern void DebugLog(const char* fmt, ...);
         if (!curPtr) return;
 
         WORD tileX = (WORD)((int)(corpseX / 24.0f));
@@ -187,6 +200,8 @@ private:
         WriteProcessMemory(ctx.hProcess, (LPVOID)(curPtr + 0x0A), &tileY, 2, NULL);
         WriteProcessMemory(ctx.hProcess, (LPVOID)(curPtr + 0x10), &rawX, 4, NULL);
         WriteProcessMemory(ctx.hProcess, (LPVOID)(curPtr + 0x14), &rawY, 4, NULL);
+
+        DebugLog("[LOOT] LootCorpse -> tile(%d,%d)", tileX, tileY);
 
         // Call HandleMoveOrAction to make game process cursor position (detect corpse)
         if (ctx.remoteHandleMoveOrAction && ctx.playerAddr > 0x1000) {

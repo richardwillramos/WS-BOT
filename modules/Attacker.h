@@ -51,8 +51,11 @@ public:
                         }
                     }
                 }
+
+                // Clear target so Targeter can select next mob
+                targetAddr = 0;
+                attackState = 0;
             }
-            attackState = 0;
             return;
         }
         killedLogged = false;

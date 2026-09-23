@@ -26,11 +26,17 @@ public:
         extern void DebugLog(const char* fmt, ...);
         if (!enabled || ctx.hProcess == NULL) return;
 
-        // If we have a target, verify it's still alive
+        // Verify current target is still valid (exists in mob list with HP > 0)
         if (selectedAddr > 0x1000) {
-            DWORD hp = 0; SIZE_T r = 0;
-            ReadProcessMemory(ctx.hProcess, (LPCVOID)(selectedAddr + 0x10C), &hp, 4, &r);
-            if (r != 4 || hp <= 0) {
+            bool stillAlive = false;
+            for (auto& m : ctx.mobs) {
+                if (m.objAddr == selectedAddr && m.hp > 0) {
+                    stillAlive = true;
+                    break;
+                }
+            }
+            if (!stillAlive) {
+                DebugLog("[TARGETER] Target lost (dead or removed), retargeting...");
                 selectedAddr = 0;
                 selectedName.clear();
             }

@@ -1,4 +1,4 @@
-# Warspear Online Bot v5.0
+# Warspear Online Bot v5.1
 
 Bot de automação para Warspear Online (cliente 32-bit, private server). Funciona via memória do processo do jogo (ReadProcessMemory/WriteProcessMemory) com arquitetura modular.
 
@@ -14,6 +14,7 @@ Bot de automação para Warspear Online (cliente 32-bit, private server). Funcio
 │  Aba Config: TreeView (árvore)  │
 │  Aba Quick: atalhos ON/OFF      │
 │  Aba Connection: conectar/jogador│
+│  Debug Console: logs em tempo real│
 │  Status bar                     │
 └──────────────┬──────────────────┘
                │ RPM / WPM
@@ -30,12 +31,27 @@ Bot de automação para Warspear Online (cliente 32-bit, private server). Funcio
 
 | Módulo | Descrição |
 |--------|-----------|
-| **Targeter** | Seleciona mob mais próximo, mantém alvo |
-| **Attacker** | Ataca alvo via cursor memory writes + Enter remoto |
+| **Targeter** | Seleciona mob com filtros (All/ByName/ByDistance), mantém alvo |
+| **Attacker** | Ataca via HandleMoveOrAction + detecção de espada + Enter remoto |
 | **Healer** | Cura player selecionado via target (timer configurável) |
-| **Follower** | Segue um player específico (seletor de lista na UI) |
-| **Looter** | Coleta corpos de mobs mortos |
+| **Follower** | Segue um player específico com walk flag + Enter local |
+| **Looter** | Coleta corpos: caminha até corpse + HandleMoveOrAction + Enter |
 | **Extra** | Anti-AFK, auto-revive, auto-sell, auto-repair |
+
+---
+
+## Debug Console
+
+O bot possui um console de debug que mostra informações em tempo real sobre todas as ações:
+
+| Tag | Informação Exibida |
+|-----|-------------------|
+| `[TARGETER]` | Mob selecionado, endereço, distância |
+| `[ATTACK]` | Coordenadas do mob, tile, detecção da espada |
+| `[FOLLOW]` | Alvo, distância, coordenadas |
+| `[LOOT]` | Corpse, distância, walk/loot, contador de loots |
+| `[HEAL]` | Endereço do alvo, tecla usada |
+| `[STATS]` | A cada 10s: posição, entidades, módulos ativos |
 
 ---
 
@@ -104,8 +120,7 @@ O cursor do jogo é acessível via `GM + 0x123C`:
 | `+0x0A` | WORD | Cursor Y (tiles) |
 | `+0x10` | DWORD | Raw X (escrita para mover cursor) |
 | `+0x14` | DWORD | Raw Y (escrita para mover cursor) |
-| `+0x7C` | DWORD | Walk flag (0x10 = walk) |
-| `+0x7C` | BYTE | Cursor action flag |
+| `+0x7C` | DWORD | Walk flag / Cursor action flag |
 
 **Walk flag:** Escrever `0x10` em `cursor+0x7C` faz o personagem andar até a posição do cursor.
 
@@ -119,9 +134,10 @@ O cursor do jogo é acessível via `GM + 0x123C`:
 
 **Como funciona o cursor:**
 1. Escrever tile X/Y em `cursor+0x08` e `cursor+0x0A` (WORD)
-2. Escrever raw X/Y em `cursor+0x10` e `cursor+0x14` (DWORD)
+2. Escrever raw X/Y em `cursor+0x10` e `cursor+0x14` (DWORD = tile * 0x180000)
 3. Escrever walk flag `0x10` em `cursor+0x7C` para movimentar
-4. Usar `CreateRemoteThread` + `keybd_event(VK_RETURN)` para confirmar
+4. Chamar `HandleMoveOrAction` via `CreateRemoteThread` para o jogo processar
+5. Verificar `cursor_action == 8` (espada) antes de confirmar ataque
 
 ### Árvore de Entidades (BST)
 
@@ -146,26 +162,30 @@ O cursor do jogo é acessível via `GM + 0x123C`:
 
 - Zona size: 28 tiles (0-27)
 - Conversão tile→raw (cursor): `rawX = tileX * 0x180000`
-- Entity raw: ler como `short` (2 bytes), valor direto (sem divisão)
+- Entity raw: DWORD, dividir por `65536.0f` para obter game coords
 
 ### Funções Relevantes
 
 | Endereço | Função | Descrição |
 |----------|--------|-----------|
-| `0x00A3F480` | `HandleMoveOrAction` | Processa movimento/ação do cursor (__thiscall localPlayer) |
+| `0x00A3F480` | `HandleMoveOrAction` | Processa movimento/ação do cursor (__thiscall localPlayer, 0) |
 | `0x00A3E0F0` | `HandleSkillOrUse` | Processa skill/uso (__thiscall localPlayer, entityPtr) |
+
+---
 
 ## Como o Ataque Funciona
 
-1. Targeter seleciona mob mais próximo com HP > 0
-2. Attacker escreve coordenadas do mob direto na memória do cursor via `WriteProcessMemory`
-3. Lê `cursor_action` em `cursor_ptr + 0x7C` para verificar se é válido
-4. Se `cursor_action == 8` (ATTACK) → usa `CreateRemoteThread` + `keybd_event(VK_RETURN)` para gerar Enter real dentro do processo do jogo
-5. Se `cursor_action != 8` → continua movendo cursor
+1. **Targeter** seleciona mob mais próximo com HP > 0 (com filtros: All/ByName/ByDistance)
+2. **Attacker** escreve coordenadas do mob no cursor via `WriteProcessMemory`
+3. Chama `HandleMoveOrAction` via `CreateRemoteThread` — o jogo processa a posição do cursor
+4. Lê `cursor_action` em `cursor_ptr + 0x7C`:
+   - Se `== 8` (ATTACK/espada detectada) → seta alvo + envia Enter → ataque
+   - Se `!= 8` → continua tentando (retries)
+5. **Looter** caminha até corpse (walk flag 0x10) + `HandleMoveOrAction` + Enter para coletar
 
 ### Por que não PostMessage?
 
-O Warspear Online usa DirectInput/raw input — `PostMessage` com `WM_KEYDOWN` não funciona. A solução é injetar um shellcode via `VirtualAllocEx` + `CreateRemoteThread` que chama `keybd_event(VK_RETURN)` dentro do processo-alvo, gerando input de nível OS que o jogo reconhece.
+O Warspear Online usa DirectInput/raw input — `PostMessage` com `WM_KEYDOWN` não funciona. A solução é usar `CreateRemoteThread` para chamar funções do próprio jogo (`HandleMoveOrAction`) e `AttachThreadInput` + `keybd_event(VK_RETURN)` para gerar input real.
 
 ---
 
@@ -174,7 +194,7 @@ O Warspear Online usa DirectInput/raw input — `PostMessage` com `WM_KEYDOWN` n
 ```
 WS-BOT/
 ├── controller/
-│   └── main.cpp                ← Controlador GUI (TreeView UI, 6 módulos)
+│   └── main.cpp                ← Controlador GUI (TreeView UI, 6 módulos, debug console)
 │
 ├── include/
 │   ├── IModule.h               ← Interface dos módulos + GameContext
@@ -182,11 +202,11 @@ WS-BOT/
 │   └── game_memory.h           ← Offsets, estruturas, cursor struct
 │
 ├── modules/
-│   ├── Targeter.h              ← Seleção de alvo
-│   ├── Attacker.h              ← Ataque via cursor memory + remote keybd_event
+│   ├── Targeter.h              ← Seleção de alvo (All/ByName/ByDistance)
+│   ├── Attacker.h              ← Ataque via HandleMoveOrAction + sword detection
 │   ├── Healer.h                ← Cura player selecionado (target + timer)
-│   ├── Looter.h                ← Auto-loot
-│   ├── Follower.h              ← Seguir player específico (cursor memory + Enter)
+│   ├── Looter.h                ← Auto-loot (walk + HandleMoveOrAction)
+│   ├── Follower.h              ← Seguir player (walk flag + Enter local)
 │   └── Extra.h                 ← Anti-AFK, auto-revive, auto-sell, auto-repair
 │
 ├── build-controller-local.bat  ← Script de compilação do controller
@@ -227,8 +247,9 @@ build-controller-local.bat
 4. Aba **Config**: expandir módulos (+) e ativar os desejados
 5. **Healer**: clicar em "Target" para selecionar o player a curar
 6. **Follower**: clicar em "Target" para selecionar o player a seguir
-7. Aba **Quick**: atalhos ON/OFF para Attack, Heal, Follow
-8. O bot começa a trabalhar automaticamente
+7. **Targeter**: selecionar modo de filtro (All/ByName/ByDistance)
+8. Aba **Quick**: atalhos ON/OFF para Attack, Heal, Follow
+9. O bot começa a trabalhar automaticamente
 
 ### Atalhos de Teclado
 
@@ -247,9 +268,9 @@ build-controller-local.bat
 
 ### Foreground Safety
 
-Todos os timers verificam se o jogo está em foreground antes de agir:
-- `GetForegroundWindow() == FindGameWindow()`
-- `!IsIconic(w)` (não minimizado)
+Todos os módulos verificam se o jogo está em foreground antes de agir:
+- `GetForegroundWindow() == ctx.gameWindow`
+- `!IsIconic(gw)` (não minimizado)
 
 ### Multi-Instance
 
@@ -258,7 +279,7 @@ O bot suporta múltiplas instâncias do Warspear Online. Cada controller conecta
 ### UI (TreeView)
 
 A UI principal usa um TreeView (árvore hierárquica) com 6 módulos:
-- **Targeter**: Status, Retarget, Max distance
+- **Targeter**: Enabled, Filter Mode (All/ByName/ByDistance), Mob Name, Max Distance, Retarget, Whitelist, Blacklist
 - **Attacker**: Status, Cooldown, Skills
 - **Healer**: Status, Target (seletor de player), Cooldown, Heal key, Min HP filter (ON/OFF), Min HP%
 - **Follower**: Status, Target (seletor de player), Distance, Max distance
@@ -266,6 +287,12 @@ A UI principal usa um TreeView (árvore hierárquica) com 6 módulos:
 - **Extra**: Anti AFK, Auto Revive, Auto Sell, Auto Repair
 
 Cada módulo é um nó pai que expande/recolhe com "+". Cliques nos filhos alternam valores ou abrem input dialogs.
+
+### Targeter - Filtros
+
+- **All**: Ataca qualquer mob (usa whitelist/blacklist)
+- **By Name**: Ataca apenas mobs com nome exato (evita variantes mais fortes)
+- **By Distance**: Ataca mob mais próximo dentro do maxDistance
 
 ### Healer - Funcionamento
 

@@ -139,13 +139,20 @@ static int g_currentTab = TAB_CONFIG;
 static HWND g_hTabBtn[3] = {};
 static HWND g_hTabPanel[3] = {};
 
-// Config tab - Accordion
-static HWND g_hModHeader[6] = {};
-static HWND g_hModPanel[6] = {};
-static HWND g_hModLabel[6][4] = {};
-static bool g_modExpanded[6] = {};
+// Config tab - TreeView
+static HWND g_hTree = NULL;
 static const wchar_t* MOD_NAMES[] = { L"Targeter", L"Attacker", L"Healer", L"Follower", L"Looter", L"Extra" };
 enum { MID_TARGETER=0, MID_ATTACKER, MID_HEALER, MID_FOLLOWER, MID_LOOTER, MID_EXTRA };
+
+// Tree item data: which module + which sub-option
+enum TreeItemKind { TREE_PARENT, TREE_TOGGLE, TREE_VALUE, TREE_SELECT };
+struct TreeItemData { int module; TreeItemKind kind; int subId; };
+static std::vector<TreeItemData> g_treeItems;
+
+// Tree item handles per module [module][subItem]
+static HTREEITEM g_hTreeParent[6] = {};
+static HTREEITEM g_hTreeChild[6][6] = {};
+static int g_treeChildCount[6] = {};
 
 // Quick actions tab
 static HWND g_hQuickBtn[8] = {};
@@ -173,11 +180,6 @@ enum MenuID {
     IDM_TOGGLE_ATTACK = 2001, IDM_TOGGLE_HEAL, IDM_TOGGLE_FOLLOW, IDM_TOGGLE_LOOT,
     IDM_TOGGLE_ALL, IDM_STOP_ALL, IDM_REFRESH, IDM_CONNECT, IDM_INJECT,
     IDM_BROWSE_DLL, IDM_DEBUG, IDM_SCALE_UP, IDM_SCALE_DOWN, IDM_EXIT,
-};
-enum {
-    IDM_MOD_HEADER = 4000,
-    IDM_MOD_TOGGLE = 4100,
-    IDM_MOD_VALUE  = 4200,
 };
 
 // ============================================================
@@ -280,10 +282,12 @@ void OpenDebugConsole(HWND parent) {
 // Font helpers
 // ============================================================
 void InitFont() {
-    g_hFont = CreateFontW(-11, 0, 0, 0, FW_NORMAL, 0, 0, 0,
+    g_hFont = CreateFontW(-13, 0, 0, 0, FW_NORMAL, 0, 0, 0,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
         DEFAULT_QUALITY, DEFAULT_PITCH|FF_SWISS, L"Segoe UI");
-    g_hTreeFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    g_hTreeFont = CreateFontW(-13, 0, 0, 0, FW_NORMAL, 0, 0, 0,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        DEFAULT_QUALITY, DEFAULT_PITCH|FF_SWISS, L"Segoe UI");
 }
 void SetFont(HWND h) { SendMessageW(h, WM_SETFONT, (WPARAM)g_hFont, TRUE); }
 void SetTreeFont(HWND h) { SendMessageW(h, WM_SETFONT, (WPARAM)g_hTreeFont, TRUE); }
@@ -765,134 +769,216 @@ int ShowSelectionList(HWND parent, const wchar_t* title, const wchar_t* prompt,
 }
 
 // ============================================================
-// UI: Accordion config - helpers
+// UI: TreeView config - helpers
 // ============================================================
-void AccordionUpdateLabels(int mod);
+// Persistent string storage for TreeView items
+static std::vector<std::wstring> g_treeStrings;
 
-void AccordionToggleModule(int mod) {
-    g_modExpanded[mod] = !g_modExpanded[mod];
-    ShowWindow(g_hModPanel[mod], g_modExpanded[mod] ? SW_SHOW : SW_HIDE);
-    AccordionUpdateLabels(mod);
-    InvalidateRect(g_hWnd, NULL, TRUE);
+HTREEITEM TreeAddItem(HWND hTree, HTREEITEM hParent, const wchar_t* text, int dataIdx) {
+    g_treeStrings.push_back(std::wstring(text));
+    TVINSERTSTRUCTW tvi{};
+    tvi.hParent = hParent;
+    tvi.hInsertAfter = TVI_LAST;
+    tvi.item.mask = TVIF_TEXT | TVIF_PARAM;
+    tvi.item.pszText = const_cast<LPWSTR>(g_treeStrings.back().c_str());
+    tvi.item.cchTextMax = (int)g_treeStrings.back().size() + 1;
+    tvi.item.lParam = dataIdx;
+    return (HTREEITEM)SendMessageW(hTree, TVM_INSERTITEMW, 0, (LPARAM)&tvi);
 }
 
-void AccordionUpdateLabels(int mod) {
-    wchar_t b[128];
-    auto setLabel = [](HWND h, const wchar_t* t) { if(h) SetWindowTextW(h, t); };
-    switch (mod) {
-    case MID_TARGETER:
-        setLabel(g_hModLabel[0][0], G->targeter.enabled ? L"[ON] Click to toggle" : L"[OFF] Click to toggle");
-        setLabel(g_hModLabel[0][1], G->targeter.retargetOnNearby ? L"Retarget: ON" : L"Retarget: OFF");
-        swprintf(b,128,L"Max dist: %d", (int)G->targeter.maxDistance);
-        setLabel(g_hModLabel[0][2], b);
-        break;
-    case MID_ATTACKER:
-        setLabel(g_hModLabel[1][0], G->attacker.enabled ? L"[ON] Click to toggle" : L"[OFF] Click to toggle");
-        swprintf(b,128,L"Cooldown: %d ms", G->attacker.globalCooldownMs);
-        setLabel(g_hModLabel[1][1], b);
-        break;
-    case MID_HEALER:
-        setLabel(g_hModLabel[2][0], G->healer.enabled ? L"[ON] Click to toggle" : L"[OFF] Click to toggle");
-        swprintf(b,128,L"Min HP%%: %d", (int)G->healer.minHpPct);
-        setLabel(g_hModLabel[2][1], b);
-        swprintf(b,128,L"Heal key: %d", G->healer.healKeyBind - 0x30);
-        setLabel(g_hModLabel[2][2], b);
-        break;
-    case MID_FOLLOWER:
-        setLabel(g_hModLabel[3][0], G->follower.enabled ? L"[ON] Click to toggle" : L"[OFF] Click to toggle");
-        if (G->follower.targetName.empty())
-            swprintf(b,128,L"Target: (click to select)");
-        else
-            swprintf(b,128,L"Target: %s (click to change)", G->follower.targetName.c_str());
-        setLabel(g_hModLabel[3][1], b);
-        swprintf(b,128,L"Dist: %.0f (click to edit)", G->follower.desiredDistance);
-        setLabel(g_hModLabel[3][2], b);
-        setLabel(g_hModLabel[3][3], L"MaxDist: 30 (click to edit)");
-        break;
-    case MID_LOOTER:
-        setLabel(g_hModLabel[4][0], G->looter.enabled ? L"[ON] Click to toggle" : L"[OFF] Click to toggle");
-        swprintf(b,128,L"Radius: %d", (int)G->looter.radius);
-        setLabel(g_hModLabel[4][1], b);
-        break;
-    case MID_EXTRA:
-        setLabel(g_hModLabel[5][0], G->extra.antiAfk ? L"Anti AFK: ON" : L"Anti AFK: OFF");
-        setLabel(g_hModLabel[5][1], G->extra.autoRevive ? L"Auto Revive: ON" : L"Auto Revive: OFF");
-        setLabel(g_hModLabel[5][2], G->extra.autoSell ? L"Auto Sell: ON" : L"Auto Sell: OFF");
-        setLabel(g_hModLabel[5][3], G->extra.autoRepair ? L"Auto Repair: ON" : L"Auto Repair: OFF");
-        break;
+void TreeSetItemText(int mod, int childIdx, const wchar_t* text) {
+    if (!g_hTree || childIdx < 0 || childIdx >= g_treeChildCount[mod]) return;
+    // Find the string slot for this item and update it
+    TVITEMW ti{};
+    ti.mask = TVIF_HANDLE | TVIF_PARAM;
+    ti.hItem = g_hTreeChild[mod][childIdx];
+    if (SendMessageW(g_hTree, TVM_GETITEM, 0, (LPARAM)&ti)) {
+        int idx = (int)ti.lParam;
+        if (idx >= 0 && idx < (int)g_treeStrings.size()) {
+            g_treeStrings[idx] = std::wstring(text);
+            ti.mask = TVIF_TEXT;
+            ti.pszText = const_cast<LPWSTR>(g_treeStrings[idx].c_str());
+            ti.cchTextMax = (int)g_treeStrings[idx].size() + 1;
+            SendMessageW(g_hTree, TVM_SETITEMW, 0, (LPARAM)&ti);
+        }
     }
-    wchar_t hdr[64];
-    swprintf(hdr,64,L"%s %s", MOD_NAMES[mod], g_modExpanded[mod] ? L"-" : L"+");
-    SetWindowTextW(g_hModHeader[mod], hdr);
+}
+
+void TreeExpandAll() {
+    for (int m = 0; m < 6; m++) {
+        if (g_hTreeParent[m])
+            SendMessageW(g_hTree, TVM_EXPAND, TVE_EXPAND, (LPARAM)g_hTreeParent[m]);
+    }
+}
+
+void RefreshTree() {
+    if (!G || !g_hTree) return;
+    wchar_t b[256];
+
+    TreeSetItemText(MID_TARGETER, 0, G->targeter.enabled ? L"Status: true" : L"Status: false");
+    TreeSetItemText(MID_TARGETER, 1, G->targeter.retargetOnNearby ? L"Retarget on nearby: ON" : L"Retarget on nearby: OFF");
+    swprintf(b,256,L"Max distance: %d", (int)G->targeter.maxDistance);
+    TreeSetItemText(MID_TARGETER, 2, b);
+
+    TreeSetItemText(MID_ATTACKER, 0, G->attacker.enabled ? L"Status: true" : L"Status: false");
+    swprintf(b,256,L"Cooldown: %d ms", G->attacker.globalCooldownMs);
+    TreeSetItemText(MID_ATTACKER, 1, b);
+    TreeSetItemText(MID_ATTACKER, 2, L"Skills");
+    TreeSetItemText(MID_ATTACKER, 3, L"Config skills in config file");
+
+    TreeSetItemText(MID_HEALER, 0, G->healer.enabled ? L"Status: true" : L"Status: false");
+    if (G->healer.targetName.empty())
+        TreeSetItemText(MID_HEALER, 1, L"Target: (none)");
+    else {
+        swprintf(b,256,L"Target: %s", G->healer.targetName.c_str());
+        TreeSetItemText(MID_HEALER, 1, b);
+    }
+    swprintf(b,256,L"Cooldown: %d ms", G->healer.cooldownMs);
+    TreeSetItemText(MID_HEALER, 2, b);
+    swprintf(b,256,L"Heal key: %c", G->healer.healKeyBind);
+    TreeSetItemText(MID_HEALER, 3, b);
+    TreeSetItemText(MID_HEALER, 4, G->healer.minHpFilter ? L"Min HP filter: ON" : L"Min HP filter: OFF");
+    swprintf(b,256,L"Min HP%%: %d", (int)G->healer.minHpPct);
+    TreeSetItemText(MID_HEALER, 5, b);
+
+    TreeSetItemText(MID_FOLLOWER, 0, G->follower.enabled ? L"Status: true" : L"Status: false");
+    if (G->follower.targetName.empty())
+        TreeSetItemText(MID_FOLLOWER, 1, L"Target: (none)");
+    else {
+        swprintf(b,256,L"Target: %s", G->follower.targetName.c_str());
+        TreeSetItemText(MID_FOLLOWER, 1, b);
+    }
+    swprintf(b,256,L"Distance: %d", (int)G->follower.desiredDistance);
+    TreeSetItemText(MID_FOLLOWER, 2, b);
+    swprintf(b,256,L"Max distance: %d", (int)G->follower.maxDistance);
+    TreeSetItemText(MID_FOLLOWER, 3, b);
+
+    TreeSetItemText(MID_LOOTER, 0, G->looter.enabled ? L"Status: true" : L"Status: false");
+    swprintf(b,256,L"Radius: %d", (int)G->looter.radius);
+    TreeSetItemText(MID_LOOTER, 1, b);
+    swprintf(b,256,L"Cooldown: %d ms", G->looter.cooldownMs);
+    TreeSetItemText(MID_LOOTER, 2, b);
+
+    TreeSetItemText(MID_EXTRA, 0, G->extra.antiAfk ? L"Anti AFK: ON" : L"Anti AFK: OFF");
+    TreeSetItemText(MID_EXTRA, 1, G->extra.autoRevive ? L"Auto Revive: ON" : L"Auto Revive: OFF");
+    TreeSetItemText(MID_EXTRA, 2, G->extra.autoSell ? L"Auto Sell: ON" : L"Auto Sell: OFF");
+    TreeSetItemText(MID_EXTRA, 3, G->extra.autoRepair ? L"Auto Repair: ON" : L"Auto Repair: OFF");
 }
 
 // ============================================================
-// UI: Accordion config - handle clicks
+// UI: TreeView config - handle item click
 // ============================================================
-void AccordionHandleClick(int id) {
-    if (id >= IDM_MOD_HEADER && id < IDM_MOD_HEADER + 6) {
-        AccordionToggleModule(id - IDM_MOD_HEADER);
-        return;
-    }
-    int mod = (id - IDM_MOD_TOGGLE) / 10;
-    int sub = (id - IDM_MOD_TOGGLE) % 10;
-    if (id >= IDM_MOD_TOGGLE && id < IDM_MOD_TOGGLE + 60) {
-        switch (mod) {
+void TreeHandleClick(NMTREEVIEWW* ntv) {
+    if (!ntv) return;
+    int idx = (int)ntv->itemNew.lParam;
+    if (idx < 0 || idx >= (int)g_treeItems.size()) return;
+    auto& td = g_treeItems[idx];
+
+    switch (td.kind) {
+    case TREE_TOGGLE:
+        switch (td.module) {
         case MID_TARGETER:
-            if (sub == 0) { G->targeter.enabled = !G->targeter.enabled; AccordionUpdateLabels(mod); }
-            else if (sub == 1) { G->targeter.retargetOnNearby = !G->targeter.retargetOnNearby; AccordionUpdateLabels(mod); }
-            else if (sub == 2) { int v = ShowInputInt(g_hWnd, L"Max Distance", (int)G->targeter.maxDistance); G->targeter.maxDistance = (float)v; AccordionUpdateLabels(mod); }
+            if (td.subId == 0) G->targeter.enabled = !G->targeter.enabled;
+            else if (td.subId == 1) G->targeter.retargetOnNearby = !G->targeter.retargetOnNearby;
             break;
         case MID_ATTACKER:
-            if (sub == 0) { G->attacker.enabled = !G->attacker.enabled; AccordionUpdateLabels(mod); }
-            else if (sub == 1) { int v = ShowInputInt(g_hWnd, L"Cooldown (ms)", G->attacker.globalCooldownMs); G->attacker.globalCooldownMs = v; AccordionUpdateLabels(mod); }
+            if (td.subId == 0) G->attacker.enabled = !G->attacker.enabled;
             break;
         case MID_HEALER:
-            if (sub == 0) { G->healer.enabled = !G->healer.enabled; AccordionUpdateLabels(mod); }
-            else if (sub == 1) { int v = ShowInputInt(g_hWnd, L"Min HP%", (int)G->healer.minHpPct); G->healer.minHpPct = (float)v; AccordionUpdateLabels(mod); }
-            else if (sub == 2) { int v = ShowInputInt(g_hWnd, L"Heal Key (1-9)", G->healer.healKeyBind - 0x30); if(v>=1&&v<=9) G->healer.healKeyBind = 0x30+v; AccordionUpdateLabels(mod); }
+            if (td.subId == 0) G->healer.enabled = !G->healer.enabled;
+            else if (td.subId == 4) G->healer.minHpFilter = !G->healer.minHpFilter;
             break;
         case MID_FOLLOWER:
-            if (sub == 0) { G->follower.enabled = !G->follower.enabled; AccordionUpdateLabels(mod); }
-            else if (sub == 1) {
-                // Build list of nearby players for selection
-                std::vector<std::wstring> options;
-                options.push_back(L"(none) - clear target");
-                for (auto& p : G->cachedPlayers) {
-                    if (p.hp <= 0) continue;
-                    wchar_t entry[128];
-                    swprintf(entry, 128, L"%s (Lv.%d, HP:%d/%d, %.0fm)", p.name, p.level, p.hp, p.maxHp, p.distance);
-                    options.push_back(entry);
-                }
-                if (options.size() == 1) {
-                    MessageBoxW(g_hWnd, L"No players nearby to follow.", L"Follower", MB_OK|MB_ICONINFORMATION);
-                    break;
-                }
-                int sel = ShowSelectionList(g_hWnd, L"Select player to follow", L"Pick a target:", options);
-                if (sel == 0) {
-                    G->follower.targetName.clear();
-                    G->follower.targetAddr = 0;
-                } else if (sel > 0 && sel < (int)G->cachedPlayers.size() + 1) {
-                    G->follower.targetName = G->cachedPlayers[sel - 1].name;
-                    G->follower.targetAddr = G->cachedPlayers[sel - 1].objAddr;
-                }
-                AccordionUpdateLabels(mod);
-            }
-            else if (sub == 2) { int v = ShowInputInt(g_hWnd, L"Desired Distance", (int)G->follower.desiredDistance); G->follower.desiredDistance = (float)v; AccordionUpdateLabels(mod); }
-            else if (sub == 3) { int v = ShowInputInt(g_hWnd, L"Max Distance", (int)G->follower.maxDistance); G->follower.maxDistance = (float)v; AccordionUpdateLabels(mod); }
+            if (td.subId == 0) G->follower.enabled = !G->follower.enabled;
             break;
         case MID_LOOTER:
-            if (sub == 0) { G->looter.enabled = !G->looter.enabled; AccordionUpdateLabels(mod); }
-            else if (sub == 1) { int v = ShowInputInt(g_hWnd, L"Loot Radius", (int)G->looter.radius); G->looter.radius = (float)v; AccordionUpdateLabels(mod); }
+            if (td.subId == 0) G->looter.enabled = !G->looter.enabled;
             break;
         case MID_EXTRA:
-            if (sub == 0) { G->extra.antiAfk = !G->extra.antiAfk; AccordionUpdateLabels(mod); }
-            else if (sub == 1) { G->extra.autoRevive = !G->extra.autoRevive; AccordionUpdateLabels(mod); }
-            else if (sub == 2) { G->extra.autoSell = !G->extra.autoSell; AccordionUpdateLabels(mod); }
-            else if (sub == 3) { G->extra.autoRepair = !G->extra.autoRepair; AccordionUpdateLabels(mod); }
+            if (td.subId == 0) G->extra.antiAfk = !G->extra.antiAfk;
+            else if (td.subId == 1) G->extra.autoRevive = !G->extra.autoRevive;
+            else if (td.subId == 2) G->extra.autoSell = !G->extra.autoSell;
+            else if (td.subId == 3) G->extra.autoRepair = !G->extra.autoRepair;
             break;
         }
-        return;
+        RefreshTree();
+        break;
+
+    case TREE_VALUE: {
+        int v = 0;
+        switch (td.module) {
+        case MID_TARGETER:
+            if (td.subId == 2) { v = ShowInputInt(g_hWnd, L"Max Distance", (int)G->targeter.maxDistance); G->targeter.maxDistance = (float)v; }
+            break;
+        case MID_ATTACKER:
+            if (td.subId == 1) { v = ShowInputInt(g_hWnd, L"Cooldown (ms)", G->attacker.globalCooldownMs); G->attacker.globalCooldownMs = v; }
+            break;
+        case MID_HEALER:
+            if (td.subId == 2) { v = ShowInputInt(g_hWnd, L"Cooldown (ms)", G->healer.cooldownMs); if(v>0) G->healer.cooldownMs = v; }
+            else if (td.subId == 3) { v = ShowInputInt(g_hWnd, L"Heal Key (1-9)", G->healer.healKeyBind - 0x30); if(v>=1&&v<=9) G->healer.healKeyBind = 0x30+v; }
+            else if (td.subId == 5) { v = ShowInputInt(g_hWnd, L"Min HP%", (int)G->healer.minHpPct); G->healer.minHpPct = (float)v; }
+            break;
+        case MID_FOLLOWER:
+            if (td.subId == 2) { v = ShowInputInt(g_hWnd, L"Desired Distance", (int)G->follower.desiredDistance); G->follower.desiredDistance = (float)v; }
+            else if (td.subId == 3) { v = ShowInputInt(g_hWnd, L"Max Distance", (int)G->follower.maxDistance); G->follower.maxDistance = (float)v; }
+            break;
+        case MID_LOOTER:
+            if (td.subId == 1) { v = ShowInputInt(g_hWnd, L"Loot Radius", (int)G->looter.radius); G->looter.radius = (float)v; }
+            else if (td.subId == 2) { v = ShowInputInt(g_hWnd, L"Cooldown (ms)", G->looter.cooldownMs); G->looter.cooldownMs = v; }
+            break;
+        }
+        RefreshTree();
+        break;
+    }
+
+    case TREE_SELECT:
+        if (td.module == MID_FOLLOWER && td.subId == 1) {
+            std::vector<std::wstring> options;
+            options.push_back(L"(none) - clear target");
+            for (auto& p : G->cachedPlayers) {
+                if (p.hp <= 0) continue;
+                wchar_t entry[128];
+                swprintf(entry, 128, L"%s (Lv.%d, HP:%d/%d, %.0fm)", p.name, p.level, p.hp, p.maxHp, p.distance);
+                options.push_back(entry);
+            }
+            if (options.size() == 1) {
+                MessageBoxW(g_hWnd, L"No players nearby to follow.", L"Follower", MB_OK|MB_ICONINFORMATION);
+                break;
+            }
+            int sel = ShowSelectionList(g_hWnd, L"Select player to follow", L"Pick a target:", options);
+            if (sel == 0) {
+                G->follower.targetName.clear();
+                G->follower.targetAddr = 0;
+            } else if (sel > 0 && sel < (int)G->cachedPlayers.size() + 1) {
+                G->follower.targetName = G->cachedPlayers[sel - 1].name;
+                G->follower.targetAddr = G->cachedPlayers[sel - 1].objAddr;
+            }
+            RefreshTree();
+        }
+        else if (td.module == MID_HEALER && td.subId == 1) {
+            std::vector<std::wstring> options;
+            options.push_back(L"(none) - clear target");
+            for (auto& p : G->cachedPlayers) {
+                if (p.hp <= 0) continue;
+                wchar_t entry[128];
+                swprintf(entry, 128, L"%s (Lv.%d, HP:%d/%d, %.0fm)", p.name, p.level, p.hp, p.maxHp, p.distance);
+                options.push_back(entry);
+            }
+            if (options.size() == 1) {
+                MessageBoxW(g_hWnd, L"No players nearby.", L"Healer", MB_OK|MB_ICONINFORMATION);
+                break;
+            }
+            int sel = ShowSelectionList(g_hWnd, L"Select player to heal", L"Pick a target:", options);
+            if (sel == 0) {
+                G->healer.targetName.clear();
+                G->healer.targetAddr = 0;
+            } else if (sel > 0 && sel < (int)G->cachedPlayers.size() + 1) {
+                G->healer.targetName = G->cachedPlayers[sel - 1].name;
+                G->healer.targetAddr = G->cachedPlayers[sel - 1].objAddr;
+            }
+            RefreshTree();
+        }
+        break;
     }
 }
 
@@ -906,6 +992,11 @@ LRESULT CALLBACK PanelWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (m == WM_CTLCOLORSTATIC) return SendMessageW(g_hWnd, WM_CTLCOLORSTATIC, w, l);
         if (m == WM_CTLCOLORLISTBOX) return SendMessageW(g_hWnd, WM_CTLCOLORLISTBOX, w, l);
         if (m == WM_HSCROLL || m == WM_VSCROLL) return SendMessageW(g_hWnd, m, w, l);
+        if (m == WM_ERASEBKGND) {
+            RECT rc; GetClientRect(h, &rc);
+            FillRect((HDC)w, &rc, (HBRUSH)(COLOR_BTNFACE + 1));
+            return 1;
+        }
     }
     return DefWindowProcW(h, m, w, l);
 }
@@ -953,34 +1044,89 @@ void CreateConfigPanel(HWND parent) {
     g_hTabPanel[TAB_CONFIG] = CreateWindowExW(0, PANEL_CLASS, L"",
         WS_CHILD|WS_VSCROLL, 0, 26, 350, 544, parent, NULL, g_hInst, NULL);
 
-    int bw = 330, bh = 22, y = 2;
+    g_hTree = CreateWindowExW(0, WC_TREEVIEWW, L"",
+        WS_CHILD|WS_VISIBLE|TVS_HASLINES|TVS_HASBUTTONS|TVS_LINESATROOT|TVS_SHOWSELALWAYS|TVS_NOHSCROLL,
+        2, 2, 346, 540, g_hTabPanel[TAB_CONFIG], (HMENU)1200, g_hInst, NULL);
+    SendMessageW(g_hTree, WM_SETFONT, (WPARAM)g_hTreeFont, TRUE);
+    TreeView_SetIndent(g_hTree, 20);
+
+    g_treeItems.clear();
     for (int m = 0; m < 6; m++) {
-        g_hModHeader[m] = CreateWindowExW(0, L"BUTTON", L"",
-            WS_CHILD|WS_VISIBLE|BS_LEFT|BS_FLAT,
-            4, y, bw, bh, g_hTabPanel[TAB_CONFIG], (HMENU)(IDM_MOD_HEADER + m), g_hInst, NULL);
-        SetFont(g_hModHeader[m]);
-        y += bh + 2;
-
-        g_hModPanel[m] = CreateWindowExW(0, PANEL_CLASS, L"",
-            WS_CHILD, 4, y, bw, 90, g_hTabPanel[TAB_CONFIG], NULL, g_hInst, NULL);
-
-        int sy = 2;
-        for (int s = 0; s < 4; s++) {
-            g_hModLabel[m][s] = CreateWindowExW(0, L"STATIC", L"",
-                WS_CHILD|WS_VISIBLE|SS_LEFT|SS_NOTIFY,
-                4, sy, bw - 8, 18, g_hModPanel[m], (HMENU)(IDM_MOD_TOGGLE + m * 10 + s), g_hInst, NULL);
-            SetFont(g_hModLabel[m][s]);
-            sy += 20;
-        }
-        y += 88;
+        g_hTreeParent[m] = NULL;
+        g_treeChildCount[m] = 0;
     }
+
+    // Targeter
+    g_hTreeParent[MID_TARGETER] = TreeAddItem(g_hTree, TVI_ROOT, MOD_NAMES[MID_TARGETER], -1);
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_TARGETER, TREE_TOGGLE, 0});
+    g_hTreeChild[MID_TARGETER][g_treeChildCount[MID_TARGETER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_TARGETER], L"Status: false", idx); }
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_TARGETER, TREE_TOGGLE, 1});
+    g_hTreeChild[MID_TARGETER][g_treeChildCount[MID_TARGETER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_TARGETER], L"Retarget on nearby: OFF", idx); }
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_TARGETER, TREE_VALUE, 2});
+    g_hTreeChild[MID_TARGETER][g_treeChildCount[MID_TARGETER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_TARGETER], L"Max distance: 30", idx); }
+
+    // Attacker
+    g_hTreeParent[MID_ATTACKER] = TreeAddItem(g_hTree, TVI_ROOT, MOD_NAMES[MID_ATTACKER], -1);
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_ATTACKER, TREE_TOGGLE, 0});
+    g_hTreeChild[MID_ATTACKER][g_treeChildCount[MID_ATTACKER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_ATTACKER], L"Status: false", idx); }
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_ATTACKER, TREE_VALUE, 1});
+    g_hTreeChild[MID_ATTACKER][g_treeChildCount[MID_ATTACKER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_ATTACKER], L"Cooldown: 1500 ms", idx); }
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_ATTACKER, TREE_TOGGLE, 2});
+    g_hTreeChild[MID_ATTACKER][g_treeChildCount[MID_ATTACKER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_ATTACKER], L"Skills", idx); }
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_ATTACKER, TREE_TOGGLE, 3});
+    g_hTreeChild[MID_ATTACKER][g_treeChildCount[MID_ATTACKER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_ATTACKER], L"Config skills in config file", idx); }
+
+    // Healer
+    g_hTreeParent[MID_HEALER] = TreeAddItem(g_hTree, TVI_ROOT, MOD_NAMES[MID_HEALER], -1);
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_HEALER, TREE_TOGGLE, 0});
+    g_hTreeChild[MID_HEALER][g_treeChildCount[MID_HEALER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_HEALER], L"Status: false", idx); }
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_HEALER, TREE_SELECT, 1});
+    g_hTreeChild[MID_HEALER][g_treeChildCount[MID_HEALER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_HEALER], L"Target: (click to select)", idx); }
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_HEALER, TREE_VALUE, 2});
+    g_hTreeChild[MID_HEALER][g_treeChildCount[MID_HEALER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_HEALER], L"Cooldown: 2000 ms", idx); }
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_HEALER, TREE_VALUE, 3});
+    g_hTreeChild[MID_HEALER][g_treeChildCount[MID_HEALER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_HEALER], L"Heal key: 1", idx); }
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_HEALER, TREE_TOGGLE, 4});
+    g_hTreeChild[MID_HEALER][g_treeChildCount[MID_HEALER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_HEALER], L"Min HP filter: OFF", idx); }
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_HEALER, TREE_VALUE, 5});
+    g_hTreeChild[MID_HEALER][g_treeChildCount[MID_HEALER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_HEALER], L"Min HP%: 60", idx); }
+
+    // Follower
+    g_hTreeParent[MID_FOLLOWER] = TreeAddItem(g_hTree, TVI_ROOT, MOD_NAMES[MID_FOLLOWER], -1);
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_FOLLOWER, TREE_TOGGLE, 0});
+    g_hTreeChild[MID_FOLLOWER][g_treeChildCount[MID_FOLLOWER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_FOLLOWER], L"Status: false", idx); }
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_FOLLOWER, TREE_SELECT, 1});
+    g_hTreeChild[MID_FOLLOWER][g_treeChildCount[MID_FOLLOWER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_FOLLOWER], L"Target: (click to select)", idx); }
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_FOLLOWER, TREE_VALUE, 2});
+    g_hTreeChild[MID_FOLLOWER][g_treeChildCount[MID_FOLLOWER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_FOLLOWER], L"Distance: 3", idx); }
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_FOLLOWER, TREE_VALUE, 3});
+    g_hTreeChild[MID_FOLLOWER][g_treeChildCount[MID_FOLLOWER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_FOLLOWER], L"Max distance: 30", idx); }
+
+    // Looter
+    g_hTreeParent[MID_LOOTER] = TreeAddItem(g_hTree, TVI_ROOT, MOD_NAMES[MID_LOOTER], -1);
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_LOOTER, TREE_TOGGLE, 0});
+    g_hTreeChild[MID_LOOTER][g_treeChildCount[MID_LOOTER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_LOOTER], L"Status: false", idx); }
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_LOOTER, TREE_VALUE, 1});
+    g_hTreeChild[MID_LOOTER][g_treeChildCount[MID_LOOTER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_LOOTER], L"Radius: 10", idx); }
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_LOOTER, TREE_VALUE, 2});
+    g_hTreeChild[MID_LOOTER][g_treeChildCount[MID_LOOTER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_LOOTER], L"Cooldown: 1200 ms", idx); }
+
+    // Extra
+    g_hTreeParent[MID_EXTRA] = TreeAddItem(g_hTree, TVI_ROOT, MOD_NAMES[MID_EXTRA], -1);
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_EXTRA, TREE_TOGGLE, 0});
+    g_hTreeChild[MID_EXTRA][g_treeChildCount[MID_EXTRA]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_EXTRA], L"Anti AFK: OFF", idx); }
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_EXTRA, TREE_TOGGLE, 1});
+    g_hTreeChild[MID_EXTRA][g_treeChildCount[MID_EXTRA]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_EXTRA], L"Auto Revive: OFF", idx); }
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_EXTRA, TREE_TOGGLE, 2});
+    g_hTreeChild[MID_EXTRA][g_treeChildCount[MID_EXTRA]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_EXTRA], L"Auto Sell: OFF", idx); }
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_EXTRA, TREE_TOGGLE, 3});
+    g_hTreeChild[MID_EXTRA][g_treeChildCount[MID_EXTRA]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_EXTRA], L"Auto Repair: OFF", idx); }
+
+    TreeExpandAll();
 }
 
 void RefreshAccordion() {
-    for (int m = 0; m < 6; m++) {
-        AccordionUpdateLabels(m);
-        ShowWindow(g_hModPanel[m], g_modExpanded[m] ? SW_SHOW : SW_HIDE);
-    }
+    RefreshTree();
 }
 
 // ============================================================
@@ -1126,13 +1272,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_COMMAND: {
         int id = LOWORD(wParam);
 
-        // Accordion module headers and settings
-        if ((id >= IDM_MOD_HEADER && id < IDM_MOD_HEADER + 6) ||
-            (id >= IDM_MOD_TOGGLE && id < IDM_MOD_TOGGLE + 60)) {
-            AccordionHandleClick(id);
-            break;
-        }
-
         // Tab buttons
         if (id >= 2100 && id <= 2102) {
             SwitchTab((TabID)(id - 2100));
@@ -1179,7 +1318,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             G->healer.enabled = false;
             G->looter.enabled = false; G->follower.enabled = false;
             G->extra.enabled = false;
-            G->attacker.targetAddr = 0; G->follower.targetAddr = 0;
+            G->attacker.targetAddr = 0; G->follower.targetAddr = 0; G->healer.targetAddr = 0;
             SetWindowTextW(g_hStatus, L"ALL STOPPED");
             DebugLog("[STOP] All modules stopped");
             break;
@@ -1286,6 +1425,15 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         break;
     }
 
+    case WM_NOTIFY: {
+        NMHDR* nmh = (NMHDR*)lParam;
+        if (nmh->idFrom == 1200 && nmh->code == TVN_SELCHANGEDW) {
+            NMTREEVIEWW* ntv = (NMTREEVIEWW*)lParam;
+            TreeHandleClick(ntv);
+        }
+        break;
+    }
+
     case WM_KEYDOWN: {
         switch (wParam) {
         case VK_F1: SendMessage(hWnd, WM_COMMAND, IDM_TOGGLE_ATTACK, 0); break;
@@ -1301,6 +1449,12 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_TIMER:
         if (wParam == 1) UpdateUI();
         break;
+
+    case WM_ERASEBKGND: {
+        RECT rc; GetClientRect(hWnd, &rc);
+        FillRect((HDC)wParam, &rc, (HBRUSH)(COLOR_BTNFACE + 1));
+        return 1;
+    }
 
     case WM_SIZE:
         if (g_hStatus) SendMessage(g_hStatus, WM_SIZE, 0, 0);

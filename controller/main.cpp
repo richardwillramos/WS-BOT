@@ -220,7 +220,11 @@ static const wchar_t* NPC_NAMES[] = {
     L"Miliciano", L"Guarda", L"Balisteiro", L"Almoxarife", L"Vicente",
     L"Leiloeira Ilse", L"Vilma", L"Rokus", L"Mestre Hedwig",
     L"Citadino", L"Citadina", L"Gregrio", L"Moraes", L"Kpqbqtqk",
-    L"Norberto, o aougueiro"
+    L"Norberto, o aougueiro",
+    // English NPC names
+    L"Guard", L"Militia", L"Ballista", L"Quartermaster", L"Vicente",
+    L"Auctioneer Ilse", L"Vilma", L"Rokus", L"Master Hedwig",
+    L"Citizen", L"Gregory", L"Moraes", L"Butcher Norberto"
 };
 static const int NPC_COUNT = sizeof(NPC_NAMES) / sizeof(NPC_NAMES[0]);
 bool IsNPC(const std::wstring& n) { for (int i=0;i<NPC_COUNT;i++) if(n==NPC_NAMES[i]) return true; return false; }

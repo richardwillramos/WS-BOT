@@ -25,7 +25,7 @@ public:
     void Tick(const GameContext& ctx) override {
         extern void DebugLog(const char* fmt, ...);
         if (!enabled || ctx.hProcess == NULL) return;
-        if (targetAddr == 0 || targetAddr <= 0x1000) { attackState = 0; return; }
+        if (targetAddr == 0 || targetAddr <= 0x1000) { attackState = 0; attackCount = 0; return; }
 
         DWORD now = ctx.tickCount;
 
@@ -59,6 +59,17 @@ public:
             return;
         }
         killedLogged = false;
+
+        // Detect unattackable target: if HP unchanged after 5 attacks, skip
+        if (attackCount == 0) {
+            lastCheckedHp = hp;
+        } else if (attackCount >= 5 && hp >= lastCheckedHp) {
+            DebugLog("[ATTACK] Target not taking damage (HP=%d), skipping...", hp);
+            targetAddr = 0;
+            attackState = 0;
+            attackCount = 0;
+            return;
+        }
 
         HWND gw = ctx.gameWindow;
         if (!gw || GetForegroundWindow() != gw || IsIconic(gw)) return;
@@ -118,6 +129,7 @@ public:
                     WriteProcessMemory(ctx.hProcess, (LPVOID)(ctx.playerAddr + 0x478), &ta, 4, NULL);
                 }
                 SendAttackEnter(gw);
+                attackCount++;
                 lastAttackTick = now;
                 attackState = 3;
                 attackStepTick = now;
@@ -206,6 +218,8 @@ private:
     DWORD attackState = 0;
     DWORD attackStepTick = 0;
     bool  killedLogged = false;
+    int   attackCount = 0;      // how many Enter attacks sent
+    int   lastCheckedHp = 0;    // HP when we started attacking
 
     static constexpr DWORD GM_PTR_OFFSET        = 0x00D387AC;
     static constexpr DWORD GM_OFFSET            = 0x14;

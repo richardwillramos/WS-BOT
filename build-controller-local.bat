@@ -12,10 +12,19 @@ if errorlevel 1 (
 cd /d "C:\Users\Admin\Documents\GitHub\WS-BOT"
 
 echo.
+echo === Compilando recursos (icone) ===
+
+rc /nologo controller\warspear.rc
+if errorlevel 1 (
+    echo AVISO: falha ao compilar o .rc - exe fica sem icone embutido.
+)
+
+echo.
 echo === Compilando warspear-controller.exe ===
 
 cl /nologo /O2 /EHsc /MTd /GS- ^
     controller\main.cpp ^
+    controller\warspear.res ^
     /Fe:warspear-controller.exe ^
     /link ^
     user32.lib ^

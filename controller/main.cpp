@@ -1364,6 +1364,7 @@ void CreateConfigPanel(HWND parent) {
         2, 2, 346, 540, g_hTabPanel[TAB_CONFIG], (HMENU)1200, g_hInst, NULL);
     SendMessageW(g_hTree, WM_SETFONT, (WPARAM)g_hTreeFont, TRUE);
     TreeView_SetIndent(g_hTree, 20);
+    SendMessageW(g_hTree, TVM_SETEXTENDEDSTYLE, 0x0004, 0x0004); // TVS_EX_DOUBLEBUFFER: menos flicker
 
     g_treeItems.clear();
     for (int m = 0; m < MOD_COUNT; m++) {
@@ -1685,10 +1686,87 @@ static void LayoutStatusBar(HWND parent) {
     SendMessageW(g_hStatus, SB_SETTEXTW, 1, (LPARAM)credit);
 }
 
+// ============================================================
+// UI: TreeView custom draw — ON/true em verde, OFF/false em vermelho
+// (NM_CUSTOMDRAW pinta na hora do desenho: sem timer, sem repaint extra)
+// ============================================================
+static bool ModuleEnabledByMid(int m) {
+    if (!G) return false;
+    switch (m) {
+    case MID_TARGETER: return G->targeter.enabled;
+    case MID_ATTACKER: return G->attacker.enabled;
+    case MID_HEALER:   return G->healer.enabled;
+    case MID_FOLLOWER: return G->follower.enabled;
+    case MID_LOOTER:   return G->looter.enabled;
+    case MID_EXTRA:    return G->extra.enabled;
+    case MID_DUNGEON:  return G->dungeon.enabled;
+    }
+    return false;
+}
+
+static LRESULT TreeCustomDraw(NMTVCUSTOMDRAW* cd) {
+    switch (cd->nmcd.dwDrawStage) {
+    case CDDS_PREPAINT:
+        return CDRF_NOTIFYITEMDRAW;
+
+    case CDDS_ITEMPREPAINT: {
+        HTREEITEM hItem = (HTREEITEM)cd->nmcd.dwItemSpec;
+        if (!hItem || !g_hTree) return CDRF_DODEFAULT;
+
+        // Item pai (nome do modulo): verde quando ligado, cinza quando desligado
+        for (int m = 0; m < MOD_COUNT; m++) {
+            if (hItem == g_hTreeParent[m]) {
+                cd->clrText = ModuleEnabledByMid(m) ? RGB(0, 130, 0) : RGB(120, 120, 120);
+                return CDRF_NEWFONT;
+            }
+        }
+
+        // Itens com valor booleano: ": true"/": ON" verde, ": false"/": OFF" vermelho
+        wchar_t txt[128] = {};
+        TVITEMW ti{};
+        ti.hItem = hItem;
+        ti.mask = TVIF_TEXT;
+        ti.pszText = txt;
+        ti.cchTextMax = 128;
+        SendMessageW(g_hTree, TVM_GETITEMW, 0, (LPARAM)&ti);
+
+        if (wcsstr(txt, L": true") || wcsstr(txt, L": ON")) {
+            cd->clrText = RGB(0, 130, 0);
+            return CDRF_NEWFONT;
+        }
+        if (wcsstr(txt, L": false") || wcsstr(txt, L": OFF")) {
+            cd->clrText = RGB(190, 30, 30);
+            return CDRF_NEWFONT;
+        }
+        return CDRF_DODEFAULT;
+    }
+    }
+    return CDRF_DODEFAULT;
+}
+
 LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_CREATE: {
         InitFont();
+
+        // Icone da janela/barra de tarefas: recurso embutido (warspear.rc)
+        // ou warspear.ico ao lado do exe (fallback p/ builds sem .rc)
+        {
+            HICON hIco = LoadIconW(g_hInst, MAKEINTRESOURCEW(1));
+            if (!hIco) {
+                wchar_t iconPath[MAX_PATH];
+                GetModuleFileNameW(NULL, iconPath, MAX_PATH);
+                wchar_t* ip = wcsrchr(iconPath, L'\\'); if (ip) ip[1] = 0;
+                wcscat_s(iconPath, L"warspear.ico");
+                hIco = (HICON)LoadImageW(NULL, iconPath, IMAGE_ICON, 0, 0,
+                                         LR_LOADFROMFILE | LR_DEFAULTSIZE);
+            }
+            if (hIco) {
+                SendMessageW(hWnd, WM_SETICON, ICON_BIG, (LPARAM)hIco);
+                SendMessageW(hWnd, WM_SETICON, ICON_SMALL, (LPARAM)hIco);
+            }
+        }
+
         CreateTabBar(hWnd);
         CreateConfigPanel(hWnd);
         CreateQuickPanel(hWnd);
@@ -1885,6 +1963,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (nmh->idFrom == 1200 && nmh->code == TVN_SELCHANGEDW) {
             NMTREEVIEWW* ntv = (NMTREEVIEWW*)lParam;
             TreeHandleClick(ntv);
+        } else if (nmh->hwndFrom == g_hTree && nmh->code == NM_CUSTOMDRAW) {
+            return TreeCustomDraw((NMTVCUSTOMDRAW*)lParam);
         }
         break;
     }

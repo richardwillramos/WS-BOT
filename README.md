@@ -31,7 +31,7 @@ Bot de automação para Warspear Online (cliente 32-bit, private server). Funcio
 
 | Módulo | Descrição |
 |--------|-----------|
-| **Targeter** | Seleciona mob com filtros (All/ByName/ByDistance), mantém alvo |
+| **Targeter** | Seleciona mob com filtros (All/ByName/ByDistance/Damaged), mantém alvo |
 | **Attacker** | Ataca: escreve cursor no tile do mob, confere espada (flag 8) + Enter |
 | **Healer** | Cura o alvo e a si mesmo; filtro por **cooldown** ou **HP%** (prioridade máxima) |
 | **Follower** | Segue um player: escreve cursor no tile dele + Enter |
@@ -333,7 +333,7 @@ O bot suporta múltiplas instâncias do Warspear Online. Cada controller conecta
 ### UI (TreeView)
 
 A UI principal usa um TreeView (árvore hierárquica) com 6 módulos:
-- **Targeter**: Enabled, Filter Mode (All/ByName/ByDistance), Mob Name, Max Distance, Retarget, Whitelist, Blacklist
+- **Targeter**: Enabled, Filter Mode (All/ByName/ByDistance/Damaged), Mob Name, Max Distance, Retarget, Whitelist, Blacklist
 - **Attacker**: Status, Cooldown, Skills
 - **Healer**: Status, Target (seletor de player), Cooldown, Heal key, **Heal Mode** (Every cooldown / HP% below), Min HP%, Self Heal, Self HP%, Self Key
 - **Follower**: Status, Target (seletor de player), Distance, Max distance
@@ -347,6 +347,9 @@ Cada módulo é um nó pai que expande/recolhe com "+". Cliques nos filhos alter
 - **All**: Ataca qualquer mob (usa whitelist/blacklist)
 - **By Name**: Ataca apenas mobs com nome exato (evita variantes mais fortes)
 - **By Distance**: Ataca mob mais próximo dentro do maxDistance
+- **Damaged (assist)**: Ataca só mobs que **já apanharam** (`hp < maxHp` — seu ou
+  da party) e prioriza o de **menor HP%**; combinado com *Retarget*, foca o alvo
+  que você mesmo magoou (ex.: acertou com uma skill de área)
 
 ### Healer - Funcionamento
 

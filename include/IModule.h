@@ -18,6 +18,9 @@ struct GameContext {
     DWORD playerAddr, gmAddr;
     HWND  gameWindow;
     DWORD tickCount;
+    // Heal priority: true while self/target HP is below the configured % —
+    // attacker and looter must yield so healing always wins (main.cpp sets it)
+    bool  holdCombat = false;
     float scale = 3.5f;
     void  (*remoteSendEnter)() = nullptr;
     void  (*remoteHandleMoveOrAction)(DWORD localPlayerAddr) = nullptr;

@@ -1057,7 +1057,9 @@ void RefreshTree() {
     TreeSetItemText(MID_HEALER, 2, b);
     swprintf(b,256,L"Heal key: %c", G->healer.healKeyBind);
     TreeSetItemText(MID_HEALER, 3, b);
-    TreeSetItemText(MID_HEALER, 4, G->healer.minHpFilter ? L"Min HP filter: ON" : L"Min HP filter: OFF");
+    { const wchar_t* hm[] = { L"Every cooldown", L"HP% below" };
+    swprintf(b,256,L"Mode: %s", hm[G->healer.healMode & 1]);
+    TreeSetItemText(MID_HEALER, 4, b); }
     swprintf(b,256,L"Min HP%%: %d", (int)G->healer.minHpPct);
     TreeSetItemText(MID_HEALER, 5, b);
     TreeSetItemText(MID_HEALER, 6, G->healer.selfHealEnabled ? L"Self Heal: ON" : L"Self Heal: OFF");
@@ -1114,7 +1116,7 @@ void TreeHandleClick(NMTREEVIEWW* ntv) {
             break;
         case MID_HEALER:
             if (td.subId == 0) G->healer.enabled = !G->healer.enabled;
-            else if (td.subId == 4) G->healer.minHpFilter = !G->healer.minHpFilter;
+            else if (td.subId == 4) G->healer.healMode = (G->healer.healMode + 1) % 2;
             else if (td.subId == 6) G->healer.selfHealEnabled = !G->healer.selfHealEnabled;
             break;
         case MID_FOLLOWER:
@@ -1329,7 +1331,7 @@ void CreateConfigPanel(HWND parent) {
     { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_HEALER, TREE_VALUE, 3});
     g_hTreeChild[MID_HEALER][g_treeChildCount[MID_HEALER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_HEALER], L"Heal key: 1", idx); }
     { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_HEALER, TREE_TOGGLE, 4});
-    g_hTreeChild[MID_HEALER][g_treeChildCount[MID_HEALER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_HEALER], L"Min HP filter: OFF", idx); }
+    g_hTreeChild[MID_HEALER][g_treeChildCount[MID_HEALER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_HEALER], L"Mode: HP% below", idx); }
     { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_HEALER, TREE_VALUE, 5});
     g_hTreeChild[MID_HEALER][g_treeChildCount[MID_HEALER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_HEALER], L"Min HP%: 60", idx); }
     { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_HEALER, TREE_TOGGLE, 6});
@@ -1475,6 +1477,29 @@ void UpdateUI() {
     }
 
     GameContext ctx = BuildContext();
+
+    // PRIORIDADE DE CURA (heal > loot > attack): enquanto o HP do proprio char
+    // ou do alvo estiver abaixo do limite definido, attacker e looter cedem o
+    // tick (o healer ja roda primeiro por causa da ordem dos modulos).
+    // Teto de 15s: se a cura nao surtir efeito (alcance/mana/alvo fora),
+    // nunca trava o bot — solta o combate ate o HP subir de novo.
+    static DWORD holdStartTick = 0;
+    static bool  holdReleased = false;
+    bool healUrgent = G->healer.enabled && G->healer.NeedsHeal(ctx);
+    if (healUrgent) {
+        if (holdStartTick == 0) {
+            holdStartTick = ctx.tickCount;
+            DebugLog("[HEAL] HP below threshold - holding attack/loot");
+        } else if (!holdReleased && ctx.tickCount - holdStartTick > 15000) {
+            holdReleased = true;
+            DebugLog("[HEAL] Hold timeout 15s (HP still low) - releasing attack/loot");
+        }
+    } else {
+        holdStartTick = 0;
+        holdReleased = false;
+    }
+    ctx.holdCombat = healUrgent && !holdReleased;
+
     G->modMgr.TickAll(ctx);
 
     // Attacker gave up on a target that never offered the attack flag (NPC/friendly)
@@ -1507,6 +1532,24 @@ void UpdateUI() {
 // ============================================================
 // WndProc
 // ============================================================
+// Status bar with 2 parts: left = status text, right = fixed credit footer
+static void LayoutStatusBar(HWND parent) {
+    if (!g_hStatus) return;
+    RECT rc; GetClientRect(parent, &rc);
+    const wchar_t* credit = L"  Dev By Richard Willian";
+    HDC hdc = GetDC(g_hStatus);
+    if (g_hFont) SelectObject(hdc, g_hFont);
+    SIZE sz = {0,0};
+    GetTextExtentPoint32W(hdc, credit, lstrlenW(credit), &sz);
+    ReleaseDC(g_hStatus, hdc);
+    int creditW = sz.cx + 24;
+    int left = rc.right - creditW;
+    if (left < 0) left = 0;
+    int parts[2] = { left, -1 };
+    SendMessageW(g_hStatus, SB_SETPARTS, 2, (LPARAM)parts);
+    SendMessageW(g_hStatus, SB_SETTEXTW, 1, (LPARAM)credit);
+}
+
 LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_CREATE: {
@@ -1519,12 +1562,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         g_hStatus = CreateWindowExW(0, STATUSCLASSNAMEW, L"",
             WS_CHILD|WS_VISIBLE|SBARS_SIZEGRIP, 0, 0, 0, 0, hWnd, NULL, g_hInst, NULL);
         SendMessageW(g_hStatus, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+        LayoutStatusBar(hWnd);
 
-        G->modMgr.Add(&G->targeter);
-        G->modMgr.Add(&G->attacker);
         G->modMgr.Add(&G->healer);
         G->modMgr.Add(&G->follower);
         G->modMgr.Add(&G->looter);
+        G->modMgr.Add(&G->targeter);
+        G->modMgr.Add(&G->attacker);
         G->modMgr.Add(&G->extra);
 
         wchar_t cfgDir[MAX_PATH];
@@ -1729,7 +1773,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     }
 
     case WM_SIZE:
-        if (g_hStatus) SendMessage(g_hStatus, WM_SIZE, 0, 0);
+        if (g_hStatus) {
+            SendMessage(g_hStatus, WM_SIZE, 0, 0);
+            LayoutStatusBar(hWnd);
+        }
         break;
 
     case WM_CTLCOLORSTATIC: {

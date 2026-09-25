@@ -9,25 +9,50 @@ public:
     bool IsEnabled() const override { return enabled; }
     void SetEnabled(bool e) override { enabled = e; }
 
-    void Start() override { lastHealTick = 0; }
-    void Stop() override  { lastHealTick = 0; }
+    void Start() override { lastSelfHealTick = 0; lastTargetHealTick = 0; }
+    void Stop() override  { lastSelfHealTick = 0; lastTargetHealTick = 0; }
+
+    static constexpr int HEAL_MODE_COOLDOWN = 0; // cura a cada N ms (cooldown)
+    static constexpr int HEAL_MODE_HP_BELOW = 1; // cura quando HP% <= limite
+
+    // True while someone needs a heal RIGHT NOW (HP below the configured %).
+    // main.cpp uses this to pause attacker/looter (heal > loot > attack).
+    bool NeedsHeal(const GameContext& ctx) const {
+        if (!enabled) return false;
+        // Self: always threshold-based (priority 1)
+        if (selfHealEnabled && selfHealKey != 0 && ctx.selfMaxHp > 0 && ctx.selfHp > 0) {
+            float selfPct = (float)ctx.selfHp / (float)ctx.selfMaxHp * 100.0f;
+            if (selfPct <= selfHpPct) return true;
+        }
+        // Target: only in HP% mode — the periodic mode is not urgent, so it
+        // must never hold combat
+        if (healMode != HEAL_MODE_HP_BELOW) return false;
+        if (healKeyBind == 0) return false;
+        if (targetAddr <= 0x1000 && targetName.empty()) return false;
+        for (auto& p : ctx.players) {
+            bool match = (targetAddr > 0x1000 && p.objAddr == targetAddr) ||
+                         (!targetName.empty() && p.name == targetName);
+            if (!match) continue;
+            if (p.hp <= 0 || p.maxHp <= 0) return false;  // dead ally never holds combat
+            return (float)p.hp / (float)p.maxHp * 100.0f <= minHpPct;
+        }
+        return false;
+    }
 
     void Tick(const GameContext& ctx) override {
         extern void DebugLog(const char* fmt, ...);
         if (!enabled || ctx.hProcess == NULL) return;
 
         DWORD now = ctx.tickCount;
-        if (now - lastHealTick < (DWORD)cooldownMs) return;
 
         HWND gw = ctx.gameWindow;
         if (!gw || GetForegroundWindow() != gw || IsIconic(gw)) return;
 
-        // ---- 1) AUTO SELF-HEAL (prioridade) ----
-        // Se meu HP % estiver abaixo do limite, cura em si mesmo.
-        if (selfHealEnabled && ctx.selfMaxHp > 0 && ctx.selfHp > 0) {
+        // ---- 1) AUTO SELF-HEAL (prioridade 1, sempre por %) ----
+        // Cooldown proprio: uma cura em si mesmo NAO atrasa a cura do alvo.
+        if (selfHealEnabled && selfHealKey != 0 && ctx.selfMaxHp > 0 && ctx.selfHp > 0) {
             float selfPct = (float)ctx.selfHp / (float)ctx.selfMaxHp * 100.0f;
-            if (selfPct <= selfHpPct) {
-                if (selfHealKey == 0) return;
+            if (selfPct <= selfHpPct && now - lastSelfHealTick >= (DWORD)cooldownMs) {
                 // Posiciona cursor em si mesmo (p/ skills de area funcionarem),
                 // aperta a tecla e confirma com Enter — igual ao follow.
                 WORD tileX = (WORD)((int)(ctx.selfX / 24.0f));
@@ -50,21 +75,22 @@ public:
                 SendGameKey(gw, (WORD)selfHealKey);
                 Sleep(80);
                 SendLocalEnter(gw);
-                lastHealTick = now;
-                return;
+                lastSelfHealTick = now;
             }
         }
 
-        // ---- 2) HEAL NO ALVO ----
+        // ---- 2) HEAL NO ALVO (prioridade 1 junto com o proprio) ----
         if (targetAddr <= 0x1000 && targetName.empty()) return;
+        if (healKeyBind == 0) return;
 
         // Acha o alvo na lista de players (por addr, com fallback por nome igual ao follow)
-        float tx = 0, ty = 0;
-        bool found = false;
+        float tx = 0, ty = 0, hpPct = 100.0f;
+        bool found = false, dead = false;
         for (auto& p : ctx.players) {
             if (p.objAddr == targetAddr) {
-                tx = p.x; ty = p.y;
-                found = true;
+                tx = p.x; ty = p.y; found = true;
+                dead = (p.hp <= 0 || p.maxHp <= 0);
+                if (!dead) hpPct = (float)p.hp / (float)p.maxHp * 100.0f;
                 break;
             }
         }
@@ -72,28 +98,22 @@ public:
             for (auto& p : ctx.players) {
                 if (p.name == targetName) {
                     targetAddr = p.objAddr;
-                    tx = p.x; ty = p.y;
-                    found = true;
+                    tx = p.x; ty = p.y; found = true;
+                    dead = (p.hp <= 0 || p.maxHp <= 0);
+                    if (!dead) hpPct = (float)p.hp / (float)p.maxHp * 100.0f;
                     break;
                 }
             }
         }
         if (!found) return;
+        if (dead) return;  // alvo morto: nao desperdicia cast
 
-        // If minHpFilter is ON, check target HP
-        if (minHpFilter) {
-            bool needsHeal = false;
-            for (auto& p : ctx.players) {
-                if (p.objAddr == targetAddr) {
-                    float hpPct = p.maxHp > 0 ? (float)p.hp / p.maxHp * 100.0f : 100.0f;
-                    if (hpPct <= minHpPct) needsHeal = true;
-                    break;
-                }
-            }
-            if (!needsHeal) return;
-        }
-
-        if (healKeyBind == 0) return;
+        // Filtro de cura (igual ao filtro do attacker/targeter):
+        //   HP_BELOW  -> so cura quando HP% <= MinHpPct (mantem sempre acima)
+        //   COOLDOWN  -> cura a cada N ms do Cooldown, ignorando HP%
+        bool need = (healMode == HEAL_MODE_HP_BELOW) ? (hpPct <= minHpPct) : true;
+        if (!need) return;
+        if (now - lastTargetHealTick < (DWORD)cooldownMs) return;
 
         // Converte pos do alvo p/ tile (mesmo calculo do follow)
         WORD tileX = (WORD)((int)(tx / 24.0f));
@@ -101,8 +121,8 @@ public:
         if (tileX > 27) tileX = 27;
         if (tileY > 27) tileY = 27;
 
-        DebugLog("[HEAL] Healing '%S' at (%.1f,%.1f) tile(%d,%d) key=%c",
-            targetName.c_str(), tx, ty, tileX, tileY, (char)healKeyBind);
+        DebugLog("[HEAL] Healing '%S' HP=%.0f%% at (%.1f,%.1f) tile(%d,%d) key=%c",
+            targetName.c_str(), hpPct, tx, ty, tileX, tileY, (char)healKeyBind);
 
         // 1. Posiciona o cursor na posicao do alvo (igual ao follow)
         DWORD curPtr = GetCursorPtr(ctx.hProcess);
@@ -122,18 +142,19 @@ public:
         // 3. Clica/confirma na posicao (Enter = click do jogo, igual follow/attacker)
         SendLocalEnter(gw);
 
-        lastHealTick = now;
+        lastTargetHealTick = now;
     }
 
     // Config
     bool  enabled = false;
     DWORD targetAddr = 0;
     std::wstring targetName;
-    bool  minHpFilter = false;
+    // Heal mode filter (like the targeter filter): HEAL_MODE_* above
+    int   healMode = HEAL_MODE_HP_BELOW;
     float minHpPct = 60.0f;
     int   cooldownMs = 2000;
     int   healKeyBind = 0x32; // '2' — heal no alvo
-    // Auto self-heal (HP próprio)
+    // Auto self-heal (HP proprio)
     bool  selfHealEnabled = true;
     float selfHpPct = 50.0f;
     int   selfHealKey = 0x31; // '1' — cura própria / pot
@@ -142,8 +163,13 @@ public:
         wchar_t buf[256];
         GetPrivateProfileStringW(L"Healer", L"Enabled", L"0", buf, 256, path);
         enabled = (buf[0] == L'1');
-        GetPrivateProfileStringW(L"Healer", L"MinHpFilter", L"0", buf, 256, path);
-        minHpFilter = (buf[0] == L'1');
+        // HealMode novo; MinHpFilter antigo vira fallback (1 = HP%, 0 = cooldown)
+        GetPrivateProfileStringW(L"Healer", L"HealMode", L"", buf, 256, path);
+        if (buf[0]) healMode = _wtoi(buf) ? HEAL_MODE_HP_BELOW : HEAL_MODE_COOLDOWN;
+        else {
+            GetPrivateProfileStringW(L"Healer", L"MinHpFilter", L"1", buf, 256, path);
+            healMode = (buf[0] == L'1') ? HEAL_MODE_HP_BELOW : HEAL_MODE_COOLDOWN;
+        }
         GetPrivateProfileStringW(L"Healer", L"MinHpPct", L"60", buf, 256, path);
         minHpPct = (float)_wtof(buf);
         GetPrivateProfileStringW(L"Healer", L"Cooldown", L"2000", buf, 256, path);
@@ -160,8 +186,11 @@ public:
 
     void SaveConfig(const wchar_t* path) const override {
         WritePrivateProfileStringW(L"Healer", L"Enabled", enabled ? L"1" : L"0", path);
-        WritePrivateProfileStringW(L"Healer", L"MinHpFilter", minHpFilter ? L"1" : L"0", path);
         wchar_t buf[32];
+        swprintf_s(buf, L"%d", healMode);
+        WritePrivateProfileStringW(L"Healer", L"HealMode", buf, path);
+        // Mantido por compatibilidade com configs antigos
+        WritePrivateProfileStringW(L"Healer", L"MinHpFilter", healMode == HEAL_MODE_HP_BELOW ? L"1" : L"0", path);
         swprintf_s(buf, L"%.0f", minHpPct);
         WritePrivateProfileStringW(L"Healer", L"MinHpPct", buf, path);
         swprintf_s(buf, L"%d", cooldownMs);
@@ -184,7 +213,7 @@ public:
             parent, (HMENU)9101, GetModuleHandle(NULL), NULL);
 
         y += 24;
-        CreateWindowExW(0, L"static", L"Min HP %:", WS_CHILD|WS_VISIBLE, x, y+2, 70, 18, parent, NULL, GetModuleHandle(NULL), NULL);
+        hLblMinHp = CreateWindowExW(0, L"static", L"Min HP %:", WS_CHILD|WS_VISIBLE, x, y+2, 70, 18, parent, NULL, GetModuleHandle(NULL), NULL);
         hEdtMinHp = CreateWindowExW(0, L"edit", L"60", WS_CHILD|WS_VISIBLE|WS_BORDER|ES_AUTOHSCROLL|ES_NUMBER,
             x+75, y, 50, 22, parent, (HMENU)9102, GetModuleHandle(NULL), NULL);
 
@@ -197,6 +226,14 @@ public:
         CreateWindowExW(0, L"static", L"Heal Key:", WS_CHILD|WS_VISIBLE, x, y+2, 70, 18, parent, NULL, GetModuleHandle(NULL), NULL);
         hEdtHealKey = CreateWindowExW(0, L"edit", L"2", WS_CHILD|WS_VISIBLE|WS_BORDER|ES_AUTOHSCROLL,
             x+75, y, 40, 22, parent, (HMENU)9104, GetModuleHandle(NULL), NULL);
+
+        y += 28;
+        CreateWindowExW(0, L"static", L"Heal Mode:", WS_CHILD|WS_VISIBLE, x, y+2, 70, 18, parent, NULL, GetModuleHandle(NULL), NULL);
+        hCboMode = CreateWindowExW(0, L"combobox", L"",
+            WS_CHILD|WS_VISIBLE|CBS_DROPDOWNLIST, x+75, y, 190, 100,
+            parent, (HMENU)9108, GetModuleHandle(NULL), NULL);
+        SendMessageW(hCboMode, CB_ADDSTRING, 0, (LPARAM)L"Every cooldown (N sec)");
+        SendMessageW(hCboMode, CB_ADDSTRING, 0, (LPARAM)L"When HP% below");
 
         y += 28;
         hChkSelfHeal = CreateWindowExW(0, L"button", L"Self Heal (HP proprio)",
@@ -221,6 +258,11 @@ public:
         if (hEdtMinHp) { wchar_t b[32]; swprintf_s(b, L"%.0f", minHpPct); SetWindowTextW(hEdtMinHp, b); }
         if (hEdtCooldown) { wchar_t b[32]; swprintf_s(b, L"%d", cooldownMs); SetWindowTextW(hEdtCooldown, b); }
         if (hEdtHealKey) { wchar_t b[4] = {(wchar_t)healKeyBind, 0}; SetWindowTextW(hEdtHealKey, b); }
+        if (hCboMode) SendMessageW(hCboMode, CB_SETCURSEL, healMode, 0);
+        // Min HP% so faz sentido no modo HP%
+        bool hpMode = (healMode == HEAL_MODE_HP_BELOW);
+        if (hLblMinHp) ShowWindow(hLblMinHp, hpMode ? SW_SHOW : SW_HIDE);
+        if (hEdtMinHp) ShowWindow(hEdtMinHp, hpMode ? SW_SHOW : SW_HIDE);
         if (hChkSelfHeal) SendMessage(hChkSelfHeal, BM_SETCHECK, selfHealEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
         if (hEdtSelfHp) { wchar_t b[32]; swprintf_s(b, L"%.0f", selfHpPct); SetWindowTextW(hEdtSelfHp, b); }
         if (hEdtSelfKey) { wchar_t b[4] = {(wchar_t)selfHealKey, 0}; SetWindowTextW(hEdtSelfKey, b); }
@@ -237,6 +279,11 @@ public:
         }
         if (id == 9104 && code == EN_CHANGE) {
             wchar_t b[4]; GetWindowTextW(hEdtHealKey, b, 4); healKeyBind = b[0] ? b[0] : 0x32;
+        }
+        if (id == 9108 && code == CBN_SELCHANGE) {
+            int sel = (int)SendMessageW(hCboMode, CB_GETCURSEL, 0, 0);
+            healMode = (sel == HEAL_MODE_COOLDOWN) ? HEAL_MODE_COOLDOWN : HEAL_MODE_HP_BELOW;
+            UpdateUI();
         }
         if (id == 9105 && code == BN_CLICKED)
             selfHealEnabled = (SendMessage(hChkSelfHeal, BM_GETCHECK, 0, 0) == BST_CHECKED);
@@ -285,7 +332,9 @@ private:
         keybd_event(VK_RETURN, 0, KEYEVENTF_KEYUP, 0);
     }
     HWND hParent = NULL;
-    HWND hChkEnabled = NULL, hEdtMinHp = NULL, hEdtCooldown = NULL, hEdtHealKey = NULL;
+    HWND hChkEnabled = NULL, hLblMinHp = NULL, hEdtMinHp = NULL, hEdtCooldown = NULL, hEdtHealKey = NULL;
+    HWND hCboMode = NULL;
     HWND hChkSelfHeal = NULL, hEdtSelfHp = NULL, hEdtSelfKey = NULL;
-    DWORD lastHealTick = 0;
+    DWORD lastSelfHealTick = 0;
+    DWORD lastTargetHealTick = 0;
 };

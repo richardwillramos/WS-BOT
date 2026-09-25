@@ -23,6 +23,9 @@ public:
         HWND gw = ctx.gameWindow;
         if (!gw || GetForegroundWindow() != gw || IsIconic(gw)) return;
 
+        // PAUSA por prioridade de cura: cura > loot > ataque
+        if (ctx.holdCombat) return;
+
         // Find corpse to loot (STANDALONE — não depende do Attacker):
         // 1) corpses da tree (hp<0)
         // 2) mobs com hp<=0 (kills de terceiros — ex: você só curando no suporte)

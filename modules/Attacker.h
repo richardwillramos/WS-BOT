@@ -34,6 +34,12 @@ public:
             return;
         }
 
+        // PAUSA por prioridade de cura: enquanto o healer precisa curar
+        // (HP do proprio ou do alvo abaixo do limite), o ataque cede — heal > loot > attack
+        if (ctx.holdCombat) {
+            return;
+        }
+
         // Verify target alive
         int hp = ReadInt(ctx.hProcess, targetAddr + ENT_HP_OFFSET);
         if (hp <= 0) {

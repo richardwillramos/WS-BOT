@@ -15,6 +15,7 @@ public:
     void Tick(const GameContext& ctx) override {
         extern void DebugLog(const char* fmt, ...);
         if (!enabled || ctx.hProcess == NULL) return;
+        if (ctx.dungeonBusy) return;   // dungeon: nao segue ninguem durante interacoes
         if (targetAddr <= 0x1000) return;
 
         DWORD now = ctx.tickCount;

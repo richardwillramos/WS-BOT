@@ -1,0 +1,4 @@
+{
+  "_ajuda": "Nomes dos bosses da dungeon. '*' no final = prefixo. Lista vazia = qualquer 'mobs todos mortos' encerra a wave (sem checagem de boss).",
+  "bosses": []
+}

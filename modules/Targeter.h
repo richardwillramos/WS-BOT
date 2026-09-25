@@ -26,6 +26,9 @@ public:
     void Tick(const GameContext& ctx) override {
         extern void DebugLog(const char* fmt, ...);
         if (!enabled || ctx.hProcess == NULL) return;
+        // Dungeon supervisor tem prioridade: nao seleciona alvo durante
+        // andar/interagir com portal, bau ou saida
+        if (ctx.dungeonBusy) return;
 
         // Verify current target is still valid (exists in mob list with HP > 0)
         if (selectedAddr > 0x1000) {

@@ -32,15 +32,18 @@ Bot de automação para Warspear Online (cliente 32-bit, private server). Funcio
 | Módulo | Descrição |
 |--------|-----------|
 | **Targeter** | Seleciona mob com filtros (All/ByName/ByDistance/Damaged), mantém alvo |
-| **Attacker** | Ataca: escreve cursor no tile do mob, confere espada (flag 8) + Enter |
+| **Attacker** | Ataca: cursor no mob, flag 8 + Enter; **skills** da UI/INI disparam key+Enter no ciclo |
 | **Healer** | Cura o alvo e a si mesmo; filtro por **cooldown** ou **HP%** (prioridade máxima) |
 | **Follower** | Segue um player: escreve cursor no tile dele + Enter |
 | **Looter** | Coleta corpos da tree e mobs mortos (cursor + Enter); Walk Radius e Max Distance configuráveis |
-| **Extra** | Anti-AFK, auto-revive, auto-sell, auto-repair |
+| **Extra** | Anti-AFK, auto-revive, auto-sell, auto-repair, **auto-buff** (tecla + cursor em si + Enter) |
+| **Dungeon** | Supervisa uma dungeon: mata waves → portal → boss/loot → baú → saída (automação por fases) |
 
-**Ordem de prioridade do tick:** `Healer → Follower → Looter → Targeter → Attacker → Extra`.
+**Ordem de prioridade do tick:** `Healer → Dungeon → Follower → Looter → Targeter → Attacker → Extra`.
 Quando o HP do próprio char ou do alvo está abaixo do limite, `holdCombat`
 pausa Attacker e Looter — **cura > loot > ataque** (teto de 15 s, nunca trava o bot).
+Durante as fases de interação da dungeon, `dungeonBusy` faz Targeter, Attacker,
+Follower e Looter cederm o tick; nas waves sem drop, `dungeonNoLoot` segura o Looter.
 
 ---
 
@@ -55,6 +58,7 @@ O bot possui um console de debug que mostra informações em tempo real sobre to
 | `[FOLLOW]` | Alvo, distância, coordenadas |
 | `[LOOT]` | Corpse, distância, walk/loot, contador de loots |
 | `[HEAL]` | Self/target com HP%, tiles, tecla; logs de hold/release da prioridade |
+| `[DUNGEON]` | Fase da run, walks, Enters (portal/baú/saída), esperas por entidade |
 | `[STATS]` | A cada 10s: posição, entidades, módulos ativos |
 
 ---
@@ -237,7 +241,7 @@ A solução é `AttachThreadInput` + `keybd_event(VK_RETURN)` para gerar input r
 ```
 WS-BOT/
 ├── controller/
-│   └── main.cpp                ← Controlador GUI (TreeView UI, 6 módulos, debug console)
+│   └── main.cpp                ← Controlador GUI (TreeView UI, 7 módulos, debug console)
 │
 ├── include/
 │   ├── IModule.h               ← Interface dos módulos + GameContext
@@ -250,11 +254,13 @@ WS-BOT/
 │   ├── Healer.h                ← Cura (Heal Mode: cooldown ou HP%, self-heal, NeedsHeal)
 │   ├── Looter.h                ← Auto-loot (corpses da tree + mobs mortos, Max Distance)
 │   ├── Follower.h              ← Seguir player (cursor no tile + Enter)
-│   └── Extra.h                 ← Anti-AFK, auto-revive, auto-sell, auto-repair
+│   ├── Extra.h                 ← Anti-AFK, auto-revive, auto-sell, auto-repair, auto-buff
+│   └── Dungeon.h               ← Supervisor de dungeon (WAVE1→PORTAL→WAVE2→BOSS_LOOT→CHEST→EXIT)
 │
 ├── config/
 │   ├── *.ini                   ← Persistência dos módulos (ModuleManager)
-│   └── npc_names.json          ← Lista editável de NPCs (re-lida no Connect)
+│   ├── npc_names.json          ← Lista editável de NPCs (re-lida no Connect)
+│   └── boss_names.json         ← Nomes dos bosses (opcional; vazio = sem checagem de boss)
 │
 ├── controller/                 ← main.cpp + config/ (o exe carrega config do próprio diretório)
 │
@@ -302,8 +308,11 @@ build-controller-local.bat
    **Heal Mode** (`Every cooldown` ou `When HP% below`)
 6. **Follower**: clicar em "Target" para selecionar o player a seguir
 7. **Targeter**: selecionar modo de filtro (All/ByName/ByDistance)
-8. Aba **Quick**: atalhos ON/OFF para Attack, Heal, Follow
-9. O bot começa a trabalhar automaticamente
+8. **Dungeon** (opcional): ao entrar na dungeon, ativar `Status` do módulo
+   Dungeon — com Targeter/Attacker/Looter ligados, ele sozinho limpa as waves,
+   usa o portal, mata o boss, coleta o baú e sai; desativa sozinho ao fim
+9. Aba **Quick**: atalhos ON/OFF para Attack, Heal, Follow
+10. O bot começa a trabalhar automaticamente
 
 ### Atalhos de Teclado
 
@@ -374,7 +383,7 @@ Cada módulo é um nó pai que expande/recolhe com "+". Cliques nos filhos alter
 A ordem de `modMgr.Add()` define a ordem do tick (timer de 200 ms):
 
 ```
-Healer → Follower → Looter → Targeter → Attacker → Extra
+Healer → Dungeon → Follower → Looter → Targeter → Attacker → Extra
 ```
 
 Se o HP do próprio char ou do alvo estiver abaixo do limite
@@ -383,6 +392,55 @@ Se o HP do próprio char ou do alvo estiver abaixo do limite
 - **Attacker** e **Looter** ignoram o tick até o HP subir
 - Teto de **15 s**: se a cura não surtir efeito (alcance/mana/alvo fora),
   o combate é liberado e rearma assim que o HP sobe de novo — nunca trava o bot
+
+### Dungeon - Automação
+
+O módulo **Dungeon** supervise uma run completa. Início manual: ative `Status`
+ao entrar na dungeon (Targeter/Attacker/Looter continuam ligados — quem cede
+o tick quando o dungeon manda é eles):
+
+```
+WAVE1 (matar) → PORTAL1 (andar + Enter no portal) → WAVE2 (matar, boss por último)
+→ BOSS_LOOT (looter coleta o drop) → CHEST (baú: abre + coleta) → EXIT (saída + confirma)
+→ DONE (auto-disable)
+```
+
+- **Fases de interação** (`PORTAL1`, `CHEST`, `EXIT`) setam `dungeonBusy`:
+  Targeter, Attacker, Follower e Looter ficam em espera; o Dungeon anda até
+  ficar perto (Walk radius), escreve o cursor na entidade e aperta **Enter**,
+  repetindo com backoff. Os mobs das waves setam `dungeonNoLoot` se
+  `LootInWaves=0` (waves não dropam loot)
+- **Fim de wave**: nenhum mob vivo por 3 s seguidos. Em WAVE2, se houver
+  lista de bosses, exige também ver o boss (ou 120 s de fallback)
+- **Tree**: `Status` (liga/desliga), `Phase` (fase atual), `Portal` / `Chest` /
+  `Exit` (nomes — clique abre diálogo de texto), `Walk radius`, `Max distance`,
+  `Loot in waves`, `Loot tries` (Enter`s no baú)
+- **INI** (`config\Dungeon.ini`): `Portal1Name`, `ChestName`, `ExitName`,
+  `WalkRadius`, `MaxDist`, `CollectTries`, `LootInWaves`, `AutoDisable`
+- **`config\boss_names.json`**: nomes dos bosses (`*` no final = prefixo);
+  lista vazia = qualquer "tudo morto" encerra a wave (re-lida no Connect)
+- Logs `[DUNGEON]` no console: fase, walks, Enters, esperas
+- **A validar ao vivo**: nome real do portal/baú/saída, se Enter bate no
+  portal, o diálogo "Tem certeza..." (Enter confirma 2×) e a coleta do baú —
+  os valores default são chute e se corrigem pelo diálogo na tree
+
+### Attacker - Skills
+
+- Clique em **Skills** na tree → diálogo `1, 3` (teclas separadas por vírgula)
+- No ciclo de ataque, quando a espada (flag 8) aparece, se alguma skill está
+  fora de cooldown ela dispara **key + Enter** antes do golpe normal
+- Cooldown por skill: `SkillNCooldown` no INI (padrão 1500 ms); ordem por
+  `SkillNPriority` (menor primeiro)
+- INI equivalente: `Skill1Name/Key/Cooldown/Priority/Enabled` ... `Skill6` —
+  os exemplos já vêm em `config\Attacker.ini` (teclas 1 e 3)
+
+### Extra - Auto Buff
+
+- Painel do Extra: **Auto Buff** + `Buff key` (padrão `5`) + `Buff cooldown`
+  (padrão 10000 ms)
+- No tick: cursor no **próprio char** + tecla + Enter (mesmo padrão do
+  self-heal do Healer); pula durante `dungeonBusy` para não bagunçar diálogo
+- INI: `BuffEnabled`, `BuffKey`, `BuffCooldown` em `config\Extra.ini`
 
 ### DLL (Legacy)
 

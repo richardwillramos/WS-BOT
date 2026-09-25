@@ -21,6 +21,11 @@ struct GameContext {
     // Heal priority: true while self/target HP is below the configured % —
     // attacker and looter must yield so healing always wins (main.cpp sets it)
     bool  holdCombat = false;
+    // Dungeon module: busy = walking/interacting with portal/chest/exit
+    // (targeter, attacker, follower, looter must yield); noLoot = during
+    // dungeon waves where mobs don't drop loot (looter must yield)
+    bool  dungeonBusy = false;
+    bool  dungeonNoLoot = false;
     float scale = 3.5f;
     void  (*remoteSendEnter)() = nullptr;
     void  (*remoteHandleMoveOrAction)(DWORD localPlayerAddr) = nullptr;

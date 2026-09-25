@@ -26,6 +26,7 @@
 #include "../modules/Looter.h"
 #include "../modules/Follower.h"
 #include "../modules/Extra.h"
+#include "../modules/Dungeon.h"
 
 // ============================================================
 // Game constants
@@ -103,6 +104,7 @@ struct BotState {
     LooterModule    looter;
     FollowerModule  follower;
     ExtraModule     extra;
+    DungeonModule   dungeon;
 
     std::vector<EntityData> cachedMobs, cachedPlayers, cachedNpcs;
     std::vector<CorpseData> cachedCorpses;
@@ -141,6 +143,11 @@ static int    g_lootCount = 0;
 static DWORD  g_lastStatsTick = 0;
 static std::wstring g_lastLootName;
 
+// Stats carousel (status bar part 0: scroll da direita para a esquerda)
+static int         g_statusPart0W = 0;      // largura da parte 0 (setada em LayoutStatusBar)
+static std::wstring g_statsFull;            // texto completo com padding p/ looping
+static DWORD       g_carouselStart = 0;     // inicio da animacao (0 = parado)
+
 // Tab system
 enum TabID { TAB_CONFIG = 0, TAB_QUICK = 1, TAB_CONN = 2 };
 static int g_currentTab = TAB_CONFIG;
@@ -149,8 +156,9 @@ static HWND g_hTabPanel[3] = {};
 
 // Config tab - TreeView
 static HWND g_hTree = NULL;
-static const wchar_t* MOD_NAMES[] = { L"Targeter", L"Attacker", L"Healer", L"Follower", L"Looter", L"Extra" };
-enum { MID_TARGETER=0, MID_ATTACKER, MID_HEALER, MID_FOLLOWER, MID_LOOTER, MID_EXTRA };
+static const wchar_t* MOD_NAMES[] = { L"Targeter", L"Attacker", L"Healer", L"Follower", L"Looter", L"Extra", L"Dungeon" };
+enum { MID_TARGETER=0, MID_ATTACKER, MID_HEALER, MID_FOLLOWER, MID_LOOTER, MID_EXTRA, MID_DUNGEON };
+static const int MOD_COUNT = 7;
 
 // Tree item data: which module + which sub-option
 enum TreeItemKind { TREE_PARENT, TREE_TOGGLE, TREE_VALUE, TREE_SELECT };
@@ -158,9 +166,9 @@ struct TreeItemData { int module; TreeItemKind kind; int subId; };
 static std::vector<TreeItemData> g_treeItems;
 
 // Tree item handles per module [module][subItem]
-static HTREEITEM g_hTreeParent[6] = {};
-static HTREEITEM g_hTreeChild[6][10] = {};
-static int g_treeChildCount[6] = {};
+static HTREEITEM g_hTreeParent[7] = {};
+static HTREEITEM g_hTreeChild[7][10] = {};
+static int g_treeChildCount[7] = {};
 
 // Quick actions tab
 static HWND g_hQuickBtn[8] = {};
@@ -304,17 +312,15 @@ static std::wstring Utf8OrAnsiToWide(const std::string& s) {
     return w;
 }
 
-static bool LoadNpcNames(const wchar_t* path) {
-    NpcNames(); // make sure built-in defaults exist even if the file fails
-
+static bool LoadNameList(const wchar_t* path, std::vector<std::wstring>& out, const char* tag) {
     HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
     if (h == INVALID_HANDLE_VALUE) {
-        DebugLog("[NPC] %S not found - using built-in list (%d names)", path, (int)NpcNames().size());
+        DebugLog("[%s] %S not found - keeping current list (%d names)", tag, path, (int)out.size());
         return false;
     }
     LARGE_INTEGER sz{};
     if (!GetFileSizeEx(h, &sz) || sz.QuadPart <= 0 || sz.QuadPart > 1024 * 1024) {
-        CloseHandle(h); DebugLog("[NPC] %S empty or too big", path); return false;
+        CloseHandle(h); DebugLog("[%s] %S empty or too big", tag, path); return false;
     }
     std::string raw((size_t)sz.QuadPart, '\0');
     DWORD got = 0;
@@ -331,7 +337,7 @@ static bool LoadNpcNames(const wchar_t* path) {
         if (*q == '"') { q++; while (q < end && *q != '"') { if (*q == '\\') q++; q++; } }
         else q++;
     }
-    if (q >= end) { DebugLog("[NPC] no [...] array in %S - keeping built-in list", path); return false; }
+    if (q >= end) { DebugLog("[%s] no [...] array in %S - keeping current list", tag, path); return false; }
     q++;
 
     while (q < end) {
@@ -378,10 +384,28 @@ static bool LoadNpcNames(const wchar_t* path) {
         if (!dup) names.push_back(w);
     }
 
-    if (names.empty()) { DebugLog("[NPC] no names parsed in %S - keeping built-in list", path); return false; }
-    NpcNames().swap(names);
-    DebugLog("[NPC] Loaded %d NPC names from npc_names.json", (int)NpcNames().size());
+    if (names.empty()) { DebugLog("[%s] no names parsed in %S - keeping current list", tag, path); return false; }
+    out.swap(names);
+    DebugLog("[%s] Loaded %d names from %S", tag, (int)out.size(), path);
     return true;
+}
+
+static bool LoadNpcNames(const wchar_t* path) {
+    NpcNames(); // make sure built-in defaults exist even if the file fails
+    return LoadNameList(path, NpcNames(), "NPC");
+}
+
+// Boss names for the Dungeon module (config\boss_names.json) - empty = any
+// "all mobs dead" ends the wave, no boss recognition needed
+std::vector<std::wstring> g_bossNames;
+
+static void ReloadBossNames() {
+    wchar_t dir[MAX_PATH];
+    GetModuleFileNameW(NULL, dir, MAX_PATH);
+    wchar_t* bs = wcsrchr(dir, L'\\'); if (bs) *bs = 0;
+    wchar_t path[MAX_PATH];
+    swprintf_s(path, L"%s\\config\\boss_names.json", dir);
+    LoadNameList(path, g_bossNames, "BOSS");
 }
 
 static void ReloadNpcNames() {
@@ -1017,7 +1041,7 @@ void TreeSetItemText(int mod, int childIdx, const wchar_t* text) {
 }
 
 void TreeExpandAll() {
-    for (int m = 0; m < 6; m++) {
+    for (int m = 0; m < MOD_COUNT; m++) {
         if (g_hTreeParent[m])
             SendMessageW(g_hTree, TVM_EXPAND, TVE_EXPAND, (LPARAM)g_hTreeParent[m]);
     }
@@ -1043,8 +1067,15 @@ void RefreshTree() {
     TreeSetItemText(MID_ATTACKER, 0, G->attacker.enabled ? L"Status: true" : L"Status: false");
     swprintf(b,256,L"Cooldown: %d ms", G->attacker.globalCooldownMs);
     TreeSetItemText(MID_ATTACKER, 1, b);
-    TreeSetItemText(MID_ATTACKER, 2, L"Skills");
-    TreeSetItemText(MID_ATTACKER, 3, L"Config skills in config file");
+    { std::wstring keys;
+    for (auto& s : G->attacker.skills) {
+        if (!s.enabled || !s.keyBind) continue;
+        if (!keys.empty()) keys += L", ";
+        keys += (wchar_t)s.keyBind;
+    }
+    if (keys.empty()) swprintf(b,256,L"Skills: (click to set)");
+    else swprintf(b,256,L"Skills: %s", keys.c_str());
+    TreeSetItemText(MID_ATTACKER, 2, b); }
 
     TreeSetItemText(MID_HEALER, 0, G->healer.enabled ? L"Status: true" : L"Status: false");
     if (G->healer.targetName.empty())
@@ -1092,6 +1123,23 @@ void RefreshTree() {
     TreeSetItemText(MID_EXTRA, 1, G->extra.autoRevive ? L"Auto Revive: ON" : L"Auto Revive: OFF");
     TreeSetItemText(MID_EXTRA, 2, G->extra.autoSell ? L"Auto Sell: ON" : L"Auto Sell: OFF");
     TreeSetItemText(MID_EXTRA, 3, G->extra.autoRepair ? L"Auto Repair: ON" : L"Auto Repair: OFF");
+
+    TreeSetItemText(MID_DUNGEON, 0, G->dungeon.enabled ? L"Status: true" : L"Status: false");
+    swprintf(b,256,L"Phase: %s", G->dungeon.PhaseName());
+    TreeSetItemText(MID_DUNGEON, 1, b);
+    swprintf(b,256,L"Portal: %s", G->dungeon.portal1Name.c_str());
+    TreeSetItemText(MID_DUNGEON, 2, b);
+    swprintf(b,256,L"Chest: %s", G->dungeon.chestName.c_str());
+    TreeSetItemText(MID_DUNGEON, 3, b);
+    swprintf(b,256,L"Exit: %s", G->dungeon.exitName.c_str());
+    TreeSetItemText(MID_DUNGEON, 4, b);
+    swprintf(b,256,L"Walk radius: %d", (int)G->dungeon.walkRadius);
+    TreeSetItemText(MID_DUNGEON, 5, b);
+    swprintf(b,256,L"Max distance: %d", (int)G->dungeon.maxDist);
+    TreeSetItemText(MID_DUNGEON, 6, b);
+    TreeSetItemText(MID_DUNGEON, 7, G->dungeon.lootInWaves ? L"Loot in waves: ON" : L"Loot in waves: OFF");
+    swprintf(b,256,L"Loot tries: %d", G->dungeon.collectTries);
+    TreeSetItemText(MID_DUNGEON, 8, b);
 }
 
 // ============================================================
@@ -1131,6 +1179,10 @@ void TreeHandleClick(NMTREEVIEWW* ntv) {
             else if (td.subId == 2) G->extra.autoSell = !G->extra.autoSell;
             else if (td.subId == 3) G->extra.autoRepair = !G->extra.autoRepair;
             break;
+        case MID_DUNGEON:
+            if (td.subId == 0) G->dungeon.enabled = !G->dungeon.enabled;
+            else if (td.subId == 7) G->dungeon.lootInWaves = !G->dungeon.lootInWaves;
+            break;
         }
         RefreshTree();
         break;
@@ -1149,6 +1201,20 @@ void TreeHandleClick(NMTREEVIEWW* ntv) {
             break;
         case MID_ATTACKER:
             if (td.subId == 1) { v = ShowInputInt(g_hWnd, L"Cooldown (ms)", G->attacker.globalCooldownMs); G->attacker.globalCooldownMs = v; }
+            else if (td.subId == 2) {
+                // Skill keys separated by comma (ex: 1, 3)
+                wchar_t cur[128] = {}, buf[128] = {};
+                bool first = true;
+                for (auto& s : G->attacker.skills) {
+                    if (!s.enabled || !s.keyBind) continue;
+                    if (!first) wcscat_s(cur, L",");
+                    wchar_t k[2] = { (wchar_t)s.keyBind, 0 };
+                    wcscat_s(cur, k);
+                    first = false;
+                }
+                ShowInputString(g_hWnd, L"Skill keys (ex: 1, 3)", cur, buf, 128);
+                G->attacker.SetSkillKeys(buf);
+            }
             break;
         case MID_HEALER:
             if (td.subId == 2) { v = ShowInputInt(g_hWnd, L"Cooldown (ms)", G->healer.cooldownMs); if(v>0) G->healer.cooldownMs = v; }
@@ -1166,6 +1232,15 @@ void TreeHandleClick(NMTREEVIEWW* ntv) {
             else if (td.subId == 2) { v = ShowInputInt(g_hWnd, L"Cooldown (ms)", G->looter.cooldownMs); G->looter.cooldownMs = v; }
             else if (td.subId == 3) { v = ShowInputInt(g_hWnd, L"Max Distance", (int)G->looter.lootMaxDistance); G->looter.lootMaxDistance = (float)v; }
             break;
+        case MID_DUNGEON: {
+            wchar_t buf[128] = {};
+            if (td.subId == 2) { ShowInputString(g_hWnd, L"Portal name (walkable)", G->dungeon.portal1Name.c_str(), buf, 128); if (buf[0]) G->dungeon.portal1Name = buf; }
+            else if (td.subId == 3) { ShowInputString(g_hWnd, L"Chest name", G->dungeon.chestName.c_str(), buf, 128); if (buf[0]) G->dungeon.chestName = buf; }
+            else if (td.subId == 4) { ShowInputString(g_hWnd, L"Exit name", G->dungeon.exitName.c_str(), buf, 128); if (buf[0]) G->dungeon.exitName = buf; }
+            else if (td.subId == 5) { v = ShowInputInt(g_hWnd, L"Walk radius", (int)G->dungeon.walkRadius); if (v > 0) G->dungeon.walkRadius = (float)v; }
+            else if (td.subId == 6) { v = ShowInputInt(g_hWnd, L"Max distance", (int)G->dungeon.maxDist); if (v > 0) G->dungeon.maxDist = (float)v; }
+            else if (td.subId == 8) { v = ShowInputInt(g_hWnd, L"Loot tries (chest)", G->dungeon.collectTries); if (v > 0) G->dungeon.collectTries = v; }
+            break; }
         }
         RefreshTree();
         break;
@@ -1291,7 +1366,7 @@ void CreateConfigPanel(HWND parent) {
     TreeView_SetIndent(g_hTree, 20);
 
     g_treeItems.clear();
-    for (int m = 0; m < 6; m++) {
+    for (int m = 0; m < MOD_COUNT; m++) {
         g_hTreeParent[m] = NULL;
         g_treeChildCount[m] = 0;
     }
@@ -1315,10 +1390,8 @@ void CreateConfigPanel(HWND parent) {
     g_hTreeChild[MID_ATTACKER][g_treeChildCount[MID_ATTACKER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_ATTACKER], L"Status: false", idx); }
     { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_ATTACKER, TREE_VALUE, 1});
     g_hTreeChild[MID_ATTACKER][g_treeChildCount[MID_ATTACKER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_ATTACKER], L"Cooldown: 1500 ms", idx); }
-    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_ATTACKER, TREE_TOGGLE, 2});
-    g_hTreeChild[MID_ATTACKER][g_treeChildCount[MID_ATTACKER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_ATTACKER], L"Skills", idx); }
-    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_ATTACKER, TREE_TOGGLE, 3});
-    g_hTreeChild[MID_ATTACKER][g_treeChildCount[MID_ATTACKER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_ATTACKER], L"Config skills in config file", idx); }
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_ATTACKER, TREE_VALUE, 2});
+    g_hTreeChild[MID_ATTACKER][g_treeChildCount[MID_ATTACKER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_ATTACKER], L"Skills: (click to set)", idx); }
 
     // Healer
     g_hTreeParent[MID_HEALER] = TreeAddItem(g_hTree, TVI_ROOT, MOD_NAMES[MID_HEALER], -1);
@@ -1373,6 +1446,27 @@ void CreateConfigPanel(HWND parent) {
     g_hTreeChild[MID_EXTRA][g_treeChildCount[MID_EXTRA]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_EXTRA], L"Auto Sell: OFF", idx); }
     { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_EXTRA, TREE_TOGGLE, 3});
     g_hTreeChild[MID_EXTRA][g_treeChildCount[MID_EXTRA]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_EXTRA], L"Auto Repair: OFF", idx); }
+
+    // Dungeon
+    g_hTreeParent[MID_DUNGEON] = TreeAddItem(g_hTree, TVI_ROOT, MOD_NAMES[MID_DUNGEON], -1);
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_DUNGEON, TREE_TOGGLE, 0});
+    g_hTreeChild[MID_DUNGEON][g_treeChildCount[MID_DUNGEON]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_DUNGEON], L"Status: false", idx); }
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_DUNGEON, TREE_TOGGLE, 1});
+    g_hTreeChild[MID_DUNGEON][g_treeChildCount[MID_DUNGEON]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_DUNGEON], L"Phase: WAVE1", idx); }
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_DUNGEON, TREE_VALUE, 2});
+    g_hTreeChild[MID_DUNGEON][g_treeChildCount[MID_DUNGEON]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_DUNGEON], L"Portal: Passagem", idx); }
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_DUNGEON, TREE_VALUE, 3});
+    g_hTreeChild[MID_DUNGEON][g_treeChildCount[MID_DUNGEON]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_DUNGEON], L"Chest: Ba\u00FA", idx); }
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_DUNGEON, TREE_VALUE, 4});
+    g_hTreeChild[MID_DUNGEON][g_treeChildCount[MID_DUNGEON]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_DUNGEON], L"Exit: Sa\u00EDda", idx); }
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_DUNGEON, TREE_VALUE, 5});
+    g_hTreeChild[MID_DUNGEON][g_treeChildCount[MID_DUNGEON]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_DUNGEON], L"Walk radius: 10", idx); }
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_DUNGEON, TREE_VALUE, 6});
+    g_hTreeChild[MID_DUNGEON][g_treeChildCount[MID_DUNGEON]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_DUNGEON], L"Max distance: 25", idx); }
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_DUNGEON, TREE_TOGGLE, 7});
+    g_hTreeChild[MID_DUNGEON][g_treeChildCount[MID_DUNGEON]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_DUNGEON], L"Loot in waves: OFF", idx); }
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_DUNGEON, TREE_VALUE, 8});
+    g_hTreeChild[MID_DUNGEON][g_treeChildCount[MID_DUNGEON]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_DUNGEON], L"Loot tries: 6", idx); }
 
     TreeExpandAll();
 }
@@ -1444,6 +1538,38 @@ void CreateConnPanel(HWND parent) {
 // ============================================================
 // UI: Update UI (called on timer)
 // ============================================================
+// Mostra os stats no status bar; se nao couber na parte 0, rola em carrossel
+// (da direita para a esquerda) com looping suave via padding de espacos.
+static void SetStatusStats(const wchar_t* text) {
+    if (!g_hStatus || !text || !text[0]) return;
+
+    if (g_carouselStart == 0) g_carouselStart = GetTickCount();
+
+    // Mede o texto com a fonte atual
+    HDC hdc = GetDC(g_hStatus);
+    if (g_hFont) SelectObject(hdc, g_hFont);
+    SIZE sz = {0,0};
+    GetTextExtentPoint32W(hdc, text, lstrlenW(text), &sz);
+    int contentW = sz.cx;
+    ReleaseDC(g_hStatus, hdc);
+
+    // Cabe na parte 0? → texto estatico (sem necessidade de scroll)
+    if (g_statusPart0W <= 0 || contentW <= g_statusPart0W - 16) {
+        SetWindowTextW(g_hStatus, text);
+        return;
+    }
+
+    // Texto + separador; rotaciona a partir do offset (1 char a cada 70ms)
+    g_statsFull = L"    ";
+    g_statsFull += text;
+    g_statsFull += L"    ";
+    int len = (int)g_statsFull.size();
+    DWORD now = GetTickCount();
+    int off = (int)(((now - g_carouselStart) / 70) % (DWORD)len);
+    std::wstring disp = g_statsFull.substr(off) + g_statsFull.substr(0, off);
+    SendMessageW(g_hStatus, SB_SETTEXTW, 0, (LPARAM)disp.c_str());
+}
+
 void UpdateUI() {
     if (!g_connected || !g_hProcess) {
         SetWindowTextW(g_hStatus, g_hProcess ? L"Connected" : L"Select Warspear and connect");
@@ -1464,9 +1590,10 @@ void UpdateUI() {
     g_playerAddr = playerAddr; g_gmAddr = gmAddr;
 
     wchar_t buf[512];
-    swprintf(buf, 512, L"%s | Lv.%d %s | HP: %d/%d | P:%d M:%d N:%d",
-        name.c_str(), level, GetClassName(classId), hp, mhp, (int)pl.size(), (int)mb.size(), (int)np.size());
-    SetWindowTextW(g_hStatus, buf);
+    swprintf(buf, 512, L"%s | Lv.%d %s | HP: %d/%d | MP: %d/%d | Pos: %.0f,%.0f | P:%d M:%d N:%d | Corpos: %d",
+        name.c_str(), level, GetClassName(classId), hp, mhp, mn, mmn, sx, sy,
+        (int)pl.size(), (int)mb.size(), (int)np.size(), (int)corpses.size());
+    SetStatusStats(buf);
 
     static std::wstring lastCharName;
     if (name != lastCharName) {
@@ -1502,6 +1629,13 @@ void UpdateUI() {
 
     G->modMgr.TickAll(ctx);
 
+    // Tree labels are static otherwise - refresh so Dungeon phase/status stay live
+    static DWORD lastTreeRefresh = 0;
+    if (ctx.tickCount - lastTreeRefresh > 1000) {
+        lastTreeRefresh = ctx.tickCount;
+        RefreshTree();
+    }
+
     // Attacker gave up on a target that never offered the attack flag (NPC/friendly)
     if (G->attacker.lastFailedAddr > 0x1000) {
         G->targeter.MarkSkipped(G->attacker.lastFailedAddr);
@@ -1536,7 +1670,7 @@ void UpdateUI() {
 static void LayoutStatusBar(HWND parent) {
     if (!g_hStatus) return;
     RECT rc; GetClientRect(parent, &rc);
-    const wchar_t* credit = L"  Dev By Richard Willian";
+    const wchar_t* credit = L"  Dev By Richard W.";
     HDC hdc = GetDC(g_hStatus);
     if (g_hFont) SelectObject(hdc, g_hFont);
     SIZE sz = {0,0};
@@ -1545,6 +1679,7 @@ static void LayoutStatusBar(HWND parent) {
     int creditW = sz.cx + 24;
     int left = rc.right - creditW;
     if (left < 0) left = 0;
+    g_statusPart0W = left;   // largura disponivel p/ o carrossel de stats
     int parts[2] = { left, -1 };
     SendMessageW(g_hStatus, SB_SETPARTS, 2, (LPARAM)parts);
     SendMessageW(g_hStatus, SB_SETTEXTW, 1, (LPARAM)credit);
@@ -1565,6 +1700,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         LayoutStatusBar(hWnd);
 
         G->modMgr.Add(&G->healer);
+        G->modMgr.Add(&G->dungeon);
         G->modMgr.Add(&G->follower);
         G->modMgr.Add(&G->looter);
         G->modMgr.Add(&G->targeter);
@@ -1577,6 +1713,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         wcscat(cfgDir, L"\\config");
         G->modMgr.LoadAll(cfgDir);
         ReloadNpcNames();
+        ReloadBossNames();
 
         RefreshAccordion();
         SwitchTab(TAB_CONFIG);
@@ -1633,6 +1770,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             G->healer.enabled = false;
             G->looter.enabled = false; G->follower.enabled = false;
             G->extra.enabled = false;
+            G->dungeon.enabled = false;
             G->attacker.targetAddr = 0; G->follower.targetAddr = 0; G->healer.targetAddr = 0;
             SetWindowTextW(g_hStatus, L"ALL STOPPED");
             DebugLog("[STOP] All modules stopped");
@@ -1682,6 +1820,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 SetWindowTextW(hWnd, wtitle);
                 DebugLog("[CONNECT] SUCCESS - %S Lv.%d", name.c_str(), level);
                 ReloadNpcNames();   // re-read config\npc_names.json on every Connect
+                ReloadBossNames();  // re-read config\boss_names.json on every Connect
                 G->modMgr.StartAll();
                 if (!m.empty()) G->attacker.targetAddr = m[0].objAddr;
                 if (!p.empty()) { G->follower.targetAddr = p[0].objAddr; G->follower.targetName = p[0].name; }

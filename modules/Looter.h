@@ -23,8 +23,9 @@ public:
         HWND gw = ctx.gameWindow;
         if (!gw || GetForegroundWindow() != gw || IsIconic(gw)) return;
 
-        // PAUSA por prioridade de cura: cura > loot > ataque
-        if (ctx.holdCombat) return;
+        // PAUSA por prioridade: cura > loot > ataque; dungeon manda no loot
+        // (dungeonNoLoot = waves sem drop; dungeonBusy = interagindo com portal/bau)
+        if (ctx.holdCombat || ctx.dungeonBusy || ctx.dungeonNoLoot) return;
 
         // Find corpse to loot (STANDALONE — não depende do Attacker):
         // 1) corpses da tree (hp<0)

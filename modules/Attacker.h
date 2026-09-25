@@ -34,9 +34,9 @@ public:
             return;
         }
 
-        // PAUSA por prioridade de cura: enquanto o healer precisa curar
-        // (HP do proprio ou do alvo abaixo do limite), o ataque cede — heal > loot > attack
-        if (ctx.holdCombat) {
+        // PAUSA por prioridade: cura (holdCombat) e dungeon (dungeonBusy)
+        // mandam no ataque — heal > loot > attack
+        if (ctx.holdCombat || ctx.dungeonBusy) {
             return;
         }
 
@@ -147,6 +147,21 @@ public:
                 noSwordTries = 0;
                 DebugLog("[ATTACK] Sword detected! action=%d, sending Enter", action);
 
+                // Fire a ready skill (cursor is already on the mob) instead of
+                // the plain hit; key + Enter, same pattern as the healer
+                SkillEntry* sk = nullptr;
+                for (auto& s : skills) {
+                    if (!s.enabled || !s.keyBind) continue;
+                    int cd = s.cooldownMs > 0 ? s.cooldownMs : 1500; // default per skill
+                    if (now - s.lastUsedTick < (DWORD)cd) continue;
+                    if (!sk || s.priority < sk->priority) sk = &s;
+                }
+                if (sk) {
+                    DebugLog("[ATTACK] Skill '%S' key=%c", sk->name.c_str(), (char)sk->keyBind);
+                    SendSkillKey(gw, sk->keyBind);
+                    sk->lastUsedTick = now;
+                }
+
                 // NOTE: do NOT write lp+0x294/0x484 here — experiment (2026-09-24)
                 // proved those writes BLOCK the attack: flag 8 + Enter worked
                 // (278->159 in one hit) without them, but with them HP never drops.
@@ -188,6 +203,25 @@ public:
     DWORD lastFailedAddr = 0;   // set once when a target was dropped as unattackable (Targeter parks it)
     int   globalCooldownMs = 1500;
     std::vector<SkillEntry> skills;
+
+    // UI dialog: "1, 3" -> skills list (key only; cooldown falls back to GlobalCooldown)
+    void SetSkillKeys(const wchar_t* csv) {
+        skills.clear();
+        if (!csv) return;
+        int prio = 1;
+        for (const wchar_t* p = csv; *p; p++) {
+            wchar_t c = *p;
+            if (c == L' ' || c == L'\t' || c == L',') continue;
+            SkillEntry s;
+            wchar_t nm[16]; swprintf_s(nm, L"Skill %c", c);
+            s.name = nm;
+            s.keyBind = (int)c;
+            s.cooldownMs = 0;
+            s.priority = prio++;
+            s.enabled = true;
+            skills.push_back(s);
+        }
+    }
 
     void LoadConfig(const wchar_t* path) override {
         wchar_t buf[256];
@@ -311,5 +345,19 @@ private:
         keybd_event(VK_RETURN, 0, 0, 0);
         Sleep(80);   // 30ms was too short in tests; 80ms proven to land hits
         keybd_event(VK_RETURN, 0, KEYEVENTF_KEYUP, 0);
+    }
+
+    // Press a skill key with foreground focus (then caller sends Enter)
+    static void SendSkillKey(HWND gw, int vk) {
+        if (!gw) return;
+        DWORD fgTid = GetWindowThreadProcessId(gw, NULL);
+        DWORD myTid = GetCurrentThreadId();
+        AttachThreadInput(myTid, fgTid, TRUE);
+        SetForegroundWindow(gw);
+        AttachThreadInput(myTid, fgTid, FALSE);
+        keybd_event((BYTE)vk, 0, 0, 0);
+        Sleep(50);
+        keybd_event((BYTE)vk, 0, KEYEVENTF_KEYUP, 0);
+        Sleep(30);
     }
 };

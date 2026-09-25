@@ -15,7 +15,7 @@ Bot de automação para Warspear Online (cliente 32-bit, private server). Funcio
 │  Aba Quick: atalhos ON/OFF      │
 │  Aba Connection: conectar/jogador│
 │  Debug Console: logs em tempo real│
-│  Status bar                     │
+│  Status bar (Dev By Richard Willian)│
 └──────────────┬──────────────────┘
                │ RPM / WPM
                ▼
@@ -33,10 +33,14 @@ Bot de automação para Warspear Online (cliente 32-bit, private server). Funcio
 |--------|-----------|
 | **Targeter** | Seleciona mob com filtros (All/ByName/ByDistance), mantém alvo |
 | **Attacker** | Ataca: escreve cursor no tile do mob, confere espada (flag 8) + Enter |
-| **Healer** | Cura player selecionado via target (timer configurável) |
+| **Healer** | Cura o alvo e a si mesmo; filtro por **cooldown** ou **HP%** (prioridade máxima) |
 | **Follower** | Segue um player: escreve cursor no tile dele + Enter |
-| **Looter** | Coleta corpos: caminha até corpse (cursor + Enter) |
+| **Looter** | Coleta corpos da tree e mobs mortos (cursor + Enter); Walk Radius e Max Distance configuráveis |
 | **Extra** | Anti-AFK, auto-revive, auto-sell, auto-repair |
+
+**Ordem de prioridade do tick:** `Healer → Follower → Looter → Targeter → Attacker → Extra`.
+Quando o HP do próprio char ou do alvo está abaixo do limite, `holdCombat`
+pausa Attacker e Looter — **cura > loot > ataque** (teto de 15 s, nunca trava o bot).
 
 ---
 
@@ -50,7 +54,7 @@ O bot possui um console de debug que mostra informações em tempo real sobre to
 | `[ATTACK]` | Coordenadas do mob, tile, detecção da espada |
 | `[FOLLOW]` | Alvo, distância, coordenadas |
 | `[LOOT]` | Corpse, distância, walk/loot, contador de loots |
-| `[HEAL]` | Endereço do alvo, tecla usada |
+| `[HEAL]` | Self/target com HP%, tiles, tecla; logs de hold/release da prioridade |
 | `[STATS]` | A cada 10s: posição, entidades, módulos ativos |
 
 ---
@@ -242,15 +246,17 @@ WS-BOT/
 │
 ├── modules/
 │   ├── Targeter.h              ← Seleção de alvo + estaciona alvos sem espada (60s)
-│   ├── Attacker.h              ← Ataque: cursor → flag 8 → alvo+Enter (5 tentativas)
-│   ├── Healer.h                ← Cura player selecionado (target + timer)
-│   ├── Looter.h                ← Auto-loot (cursor no corpse + Enter)
+│   ├── Attacker.h              ← Ataque: cursor → flag 8 → alvo+Enter; cede a holdCombat
+│   ├── Healer.h                ← Cura (Heal Mode: cooldown ou HP%, self-heal, NeedsHeal)
+│   ├── Looter.h                ← Auto-loot (corpses da tree + mobs mortos, Max Distance)
 │   ├── Follower.h              ← Seguir player (cursor no tile + Enter)
 │   └── Extra.h                 ← Anti-AFK, auto-revive, auto-sell, auto-repair
 │
 ├── config/
 │   ├── *.ini                   ← Persistência dos módulos (ModuleManager)
 │   └── npc_names.json          ← Lista editável de NPCs (re-lida no Connect)
+│
+├── controller/                 ← main.cpp + config/ (o exe carrega config do próprio diretório)
 │
 ├── build-controller-local.bat  ← Script de compilação do controller
 └── README.md
@@ -272,6 +278,10 @@ cd WS-BOT
 build-controller-local.bat
 ```
 
+> Existem dois binários (`warspear-controller.exe` na raiz e
+> `controller\warspear-controller.exe`) — **mesmo fonte**; reconstrua os dois
+> após qualquer alteração para não usar um exe desatualizado.
+
 ### Flags de Compilação Atuais
 
 ```
@@ -288,7 +298,8 @@ build-controller-local.bat
 2. Abrir `warspear-controller.exe`
 3. Aba **Connection**: selecionar `warspear.exe` na lista e clicar **CONNECT**
 4. Aba **Config**: expandir módulos (+) e ativar os desejados
-5. **Healer**: clicar em "Target" para selecionar o player a curar
+5. **Healer**: clicar em "Target" para selecionar o player a curar e escolher o
+   **Heal Mode** (`Every cooldown` ou `When HP% below`)
 6. **Follower**: clicar em "Target" para selecionar o player a seguir
 7. **Targeter**: selecionar modo de filtro (All/ByName/ByDistance)
 8. Aba **Quick**: atalhos ON/OFF para Attack, Heal, Follow
@@ -324,9 +335,9 @@ O bot suporta múltiplas instâncias do Warspear Online. Cada controller conecta
 A UI principal usa um TreeView (árvore hierárquica) com 6 módulos:
 - **Targeter**: Enabled, Filter Mode (All/ByName/ByDistance), Mob Name, Max Distance, Retarget, Whitelist, Blacklist
 - **Attacker**: Status, Cooldown, Skills
-- **Healer**: Status, Target (seletor de player), Cooldown, Heal key, Min HP filter (ON/OFF), Min HP%
+- **Healer**: Status, Target (seletor de player), Cooldown, Heal key, **Heal Mode** (Every cooldown / HP% below), Min HP%, Self Heal, Self HP%, Self Key
 - **Follower**: Status, Target (seletor de player), Distance, Max distance
-- **Looter**: Status, Radius, Cooldown
+- **Looter**: Status, Radius, Cooldown, Max Distance
 - **Extra**: Anti AFK, Auto Revive, Auto Sell, Auto Repair
 
 Cada módulo é um nó pai que expande/recolhe com "+". Cliques nos filhos alternam valores ou abrem input dialogs.
@@ -340,10 +351,35 @@ Cada módulo é um nó pai que expande/recolhe com "+". Cliques nos filhos alter
 ### Healer - Funcionamento
 
 - **Target**: seleciona um player da lista de nearby
-- **Cooldown**: tempo em ms entre cada cura
+- **Heal Mode** (combo, mesmo padrão do filtro do Targeter):
+  - **Every cooldown (N sec)**: cura a cada `Cooldown` ms, ignorando HP
+  - **When HP% below**: só cura se HP do alvo (ou HP próprio) ≤ o limite —
+    mantém o HP **sempre acima** da % definida
+- **Cooldown (ms)**: intervalo entre curas (padrão `2000`; os INIs antigos
+  traziam `10000`, o que atrasava demais a cura)
 - **Heal Key**: tecla da skill de cura (1-9)
-- **Min HP filter OFF**: cura no timer sem checar HP
-- **Min HP filter ON**: só cura se HP do target abaixo do %
+- **Self Heal**: cura própria automática por HP% (Self HP% + Self Key + Enter)
+  com **cooldown próprio** — uma self-heal nunca atrasa a cura do alvo
+- Alvo morto (`hp <= 0`) é ignorado; a self-heal roda **primeiro** dentro do tick
+- A checagem de necessidade (`NeedsHeal`) acontece **antes** do cooldown
+- **Prioridade**: `NeedsHeal` sinaliza `holdCombat` no GameContext → Attacker e
+  Looter cedem o tick (cura > loot > ataque), com teto de 15 s. No modo
+  *Every cooldown* a cura nunca segura o combate (não é urgente)
+
+### Prioridade: Cura > Loot > Ataque
+
+A ordem de `modMgr.Add()` define a ordem do tick (timer de 200 ms):
+
+```
+Healer → Follower → Looter → Targeter → Attacker → Extra
+```
+
+Se o HP do próprio char ou do alvo estiver abaixo do limite
+(`Healer::NeedsHeal`), o `GameContext` sai com `holdCombat = true`:
+
+- **Attacker** e **Looter** ignoram o tick até o HP subir
+- Teto de **15 s**: se a cura não surtir efeito (alcance/mana/alvo fora),
+  o combate é liberado e rearma assim que o HP sobe de novo — nunca trava o bot
 
 ### DLL (Legacy)
 

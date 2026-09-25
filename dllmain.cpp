@@ -41,7 +41,7 @@ void Log(const char* msg) {
 template<typename T> T GR(DWORD a) { T v{}; __try { v = *(T*)a; } __except(EXCEPTION_EXECUTE_HANDLER){} return v; }
 template<typename T> void GW(DWORD a, T v) { __try { *(T*)a = v; } __except(EXCEPTION_EXECUTE_HANDLER){} }
 
-DWORD GetSys() { return GR<DWORD>(0x00D387AC); }
+DWORD GetSys() { return GR<DWORD>(0x00D8F98C); }
 DWORD GetGM(DWORD s) { return (s > 0x1000) ? GR<DWORD>(s + 0x14) : 0; }
 DWORD GetLP(DWORD g) { return (g > 0x1000) ? GR<DWORD>(g + 0x40) : 0; }
 
@@ -51,7 +51,7 @@ DWORD GetLP(DWORD g) { return (g > 0x1000) ? GR<DWORD>(g + 0x40) : 0; }
 DWORD GetCursorPtr() {
     DWORD gm = GetGM(GetSys());
     if (gm == 0) return 0;
-    return GR<DWORD>(gm + 0x123C);
+    return GR<DWORD>(gm + 0x1244);
 }
 
 short ReadCursorX() {
@@ -148,6 +148,7 @@ DWORD WINAPI BotThread(LPVOID) {
     int atkState = 0;
     DWORD lastAtkTick = 0;
     DWORD lastStepTick = 0;
+    DWORD noSwordTick = 0;
     DWORD atkCooldown = 1500;
     DWORD lastLogTick = 0;
 
@@ -157,7 +158,7 @@ DWORD WINAPI BotThread(LPVOID) {
         // ===== FOLLOW MODE =====
         if (g_cmd->followOn && g_cmd->followAddr > 0x1000) {
             DWORD followTarget = (DWORD)g_cmd->followAddr;
-            int fhp = GR<int>(followTarget + 0x10C);
+            int fhp = GR<int>(followTarget + 0x110);
             if (fhp > 0) {
                 DoFollow(followTarget);
             }
@@ -168,7 +169,7 @@ DWORD WINAPI BotThread(LPVOID) {
         // ===== ATTACK MODE =====
         if (g_cmd->attackOn && g_cmd->targetAddr > 0x1000) {
             DWORD targetAddr = (DWORD)g_cmd->targetAddr;
-            int hp = GR<int>(targetAddr + 0x10C);
+            int hp = GR<int>(targetAddr + 0x110);
 
             if (hp <= 0) {
                 // Target dead
@@ -203,10 +204,24 @@ DWORD WINAPI BotThread(LPVOID) {
                     // Cursor on mob tile, check attack flag
                     int action = ReadCursorAction();
                     if (action == CURSOR_ACTION_ATTACK) {
+                        noSwordTick = 0;
                         atkState = 2;
+                    } else {
+                        // Tile reached but the game offers no attack (NPC, friendly or
+                        // out of reach). Do NOT spin here forever: give up after 3s.
+                        if (noSwordTick == 0) noSwordTick = now;
+                        else if (now - noSwordTick > 3000) {
+                            wsprintfA(buf, "[ATK] No attack flag on target (NPC/out of reach), giving up");
+                            Log(buf);
+                            noSwordTick = 0;
+                            atkState = 0;
+                            if (g_cmd->targetAddr == (volatile long)targetAddr) g_cmd->targetAddr = 0;
+                            Sleep(1000);
+                        }
                     }
                     break;
                 }
+                noSwordTick = 0;
 
                 // Move cursor one tile using arrow key
                 WORD vk = 0;

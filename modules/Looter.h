@@ -10,8 +10,8 @@ public:
     bool IsEnabled() const override { return enabled; }
     void SetEnabled(bool e) override { enabled = e; }
 
-    void Start() override { lastLootTick = 0; lootingState = 0; }
-    void Stop() override  { lastLootTick = 0; lootingState = 0; }
+    void Start() override { lastLootTick = 0; lootingState = 0; clickAttempts = 0; lastCX = lastCY = 0; }
+    void Stop() override  { lastLootTick = 0; lootingState = 0; clickAttempts = 0; lastCX = lastCY = 0; }
 
     void Tick(const GameContext& ctx) override {
         extern void DebugLog(const char* fmt, ...);
@@ -40,7 +40,7 @@ public:
             corpseY = ctx.pendingCorpse->y;
             hasCorpse = true;
 
-            if (now - ctx.pendingCorpse->time > 15000) {
+            if (now - ctx.pendingCorpse->time > 30000) {
                 ctx.pendingCorpse->valid = false;
                 hasCorpse = false;
                 DebugLog("[LOOT] Pending corpse expired");
@@ -58,17 +58,28 @@ public:
             DebugLog("[LOOT] Walking toward '%S' dist=%.1f", corpseName.c_str(), dist);
             WalkToPosition(ctx, gw, corpseX, corpseY);
         } else {
-            // Close enough — use real mouse click to interact with corpse on screen
+            // Close enough — click the corpse. One blind click often misses
+            // (corpse shifted, scale off), so retry up to 3 clicks while the
+            // corpse is valid instead of invalidating after the first one.
+            if (corpseX != lastCX || corpseY != lastCY) { clickAttempts = 0; lastCX = corpseX; lastCY = corpseY; }
+            if (clickAttempts >= 3) {
+                // Already tried 3 times — give up on this corpse so we never
+                // stall the bot, but only now.
+                lootCount++;
+                DebugLog("[LOOT] Gave up on '%S' after 3 clicks | Total=%d", corpseName.c_str(), lootCount);
+                if (ctx.pendingCorpse) ctx.pendingCorpse->valid = false;
+                clickAttempts = 0;
+                lastLootTick = now;
+                return;
+            }
             int cx, cy;
             if (GameToClient(ctx, corpseX, corpseY, cx, cy)) {
-                DebugLog("[LOOT] Click corpse '%S' -> client(%d,%d) dist=%.1f", corpseName.c_str(), cx, cy, dist);
+                DebugLog("[LOOT] Click corpse '%S' (%d/3) -> client(%d,%d) dist=%.1f", corpseName.c_str(), clickAttempts + 1, cx, cy, dist);
                 ClickAtClient(gw, cx, cy);
                 Sleep(400);
                 SendLocalEnter(gw);
                 Sleep(300);
-                lootCount++;
-                DebugLog("[LOOT] Looted '%S' #%d | Total=%d", corpseName.c_str(), lootCount, lootCount);
-                if (ctx.pendingCorpse) ctx.pendingCorpse->valid = false;
+                clickAttempts++;
                 lastLootTick = now;
             }
         }
@@ -144,6 +155,8 @@ private:
     HWND hChkEnabled = NULL, hEdtRadius = NULL, hEdtCooldown = NULL;
     DWORD lastLootTick = 0;
     DWORD lootingState = 0;
+    int clickAttempts = 0;
+    float lastCX = 0, lastCY = 0;
 
     // Convert game coordinates to client-area screen coordinates
     // Warspear 2D top-down: player always centered, scale = pixels per game unit
@@ -236,13 +249,13 @@ private:
 
     static DWORD GetCursorPtr(HANDLE hProc) {
         DWORD gmPtr = 0; SIZE_T r = 0;
-        ReadProcessMemory(hProc, (LPCVOID)0x00D387AC, &gmPtr, 4, &r);
+        ReadProcessMemory(hProc, (LPCVOID)0x00D8F98C, &gmPtr, 4, &r);
         if (r != 4 || gmPtr <= 0x1000) return 0;
         DWORD gm = 0;
         ReadProcessMemory(hProc, (LPCVOID)(gmPtr + 0x14), &gm, 4, &r);
         if (r != 4 || gm <= 0x1000) return 0;
         DWORD cur = 0;
-        ReadProcessMemory(hProc, (LPCVOID)(gm + 0x123C), &cur, 4, &r);
+        ReadProcessMemory(hProc, (LPCVOID)(gm + 0x1244), &cur, 4, &r);
         return (r == 4) ? cur : 0;
     }
 };

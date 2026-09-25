@@ -50,6 +50,7 @@ public:
             float bestDist = 9999.0f;
             for (auto& m : ctx.mobs) {
                 if (m.hp <= 0) continue;
+                if (IsParked(m.objAddr, ctx.tickCount)) continue;   // failed the sword check before
 
                 // Hard distance limit (always applied)
                 if (m.distance > maxDistance) continue;
@@ -116,6 +117,30 @@ public:
     std::vector<std::wstring> whitelist;
     std::vector<std::wstring> blacklist;
     bool  retargetOnNearby = true;
+
+    // ---- Unattackable targets (NPC, friendly, unreachable) -----------------
+    // Attacker parks a target here when the cursor never shows the sword, so we
+    // do not select the same creature again and again for a while.
+    struct Skipped { DWORD addr; DWORD until; };
+    std::vector<Skipped> skipped;
+
+    void MarkSkipped(DWORD addr) {
+        if (addr <= 0x1000) return;
+        DWORD until = GetTickCount() + 60000;
+        for (auto& s : skipped) if (s.addr == addr) { s.until = until; return; }
+        skipped.push_back({addr, until});
+        if (selectedAddr == addr) { selectedAddr = 0; selectedName.clear(); }
+    }
+
+    bool IsParked(DWORD addr, DWORD now) {
+        for (size_t i = 0; i < skipped.size(); i++) {
+            if (skipped[i].addr != addr) continue;
+            if ((LONG)(now - skipped[i].until) < 0) return true;  // still parked
+            skipped.erase(skipped.begin() + (int)i);              // expired
+            return false;
+        }
+        return false;
+    }
 
     void LoadConfig(const wchar_t* path) override {
         wchar_t buf[256];

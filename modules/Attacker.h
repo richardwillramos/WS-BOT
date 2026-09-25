@@ -25,7 +25,7 @@ public:
     void Tick(const GameContext& ctx) override {
         extern void DebugLog(const char* fmt, ...);
         if (!enabled || ctx.hProcess == NULL) return;
-        if (targetAddr == 0 || targetAddr <= 0x1000) { attackState = 0; attackCount = 0; return; }
+        if (targetAddr == 0 || targetAddr <= 0x1000) { attackState = 0; attackCount = 0; noSwordTries = 0; return; }
 
         DWORD now = ctx.tickCount;
 
@@ -91,7 +91,22 @@ public:
                 break;
             }
         }
-        if (!found) { targetAddr = 0; attackState = 0; return; }
+        if (!found) {
+            // Target vanished from mob list while engaged: server removes dead
+            // mobs instantly, so the HP<=0 tick is often missed. Treat as kill
+            // and save last known coords so the looter still visits the corpse.
+            if (attackCount > 0 && ctx.pendingCorpse && !ctx.pendingCorpse->valid) {
+                ctx.pendingCorpse->objAddr = targetAddr;
+                ctx.pendingCorpse->name = targetName;
+                ctx.pendingCorpse->x = targetGX;
+                ctx.pendingCorpse->y = targetGY;
+                ctx.pendingCorpse->time = ctx.tickCount;
+                ctx.pendingCorpse->valid = true;
+                DebugLog("[ATTACK] Target vanished after %d attacks, saved corpse: '%S' at (%.1f,%.1f)",
+                    attackCount, targetName.c_str(), targetGX, targetGY);
+            }
+            targetAddr = 0; attackState = 0; attackCount = 0; return;
+        }
 
         // Convert mob game coords to tile coords
         WORD mobTileX = (WORD)((int)(mobGX / 24.0f));
@@ -107,10 +122,10 @@ public:
             // 1. Write cursor position on mob (tile + raw)
             WriteCursorOnMob(ctx.hProcess, curPtr, mobTileX, mobTileY);
 
-            // 2. Call HandleMoveOrAction to force game to process cursor position
-            //    This updates +0x7C to 8 (attack) if cursor is on hostile mob
+            // 2. The game recomputes cursor+0x7C by itself from the cursor struct
+            //    (verified after the update), so no game function call is needed.
             if (ctx.remoteHandleMoveOrAction && ctx.playerAddr > 0x1000) {
-                ctx.remoteHandleMoveOrAction(ctx.playerAddr);
+                ctx.remoteHandleMoveOrAction(ctx.playerAddr);  // no-op, kept for compatibility
             }
 
             attackState = 2;
@@ -123,22 +138,33 @@ public:
             int action = ReadInt(ctx.hProcess, curPtr + CUR_ACTION_OFFSET);
 
             if (action == CURSOR_ACTION_ATTACK) {
+                noSwordTries = 0;
                 DebugLog("[ATTACK] Sword detected! action=%d, sending Enter", action);
 
-                // Sword detected! Set target + send Enter
-                if (ctx.playerAddr > 0x1000) {
-                    DWORD ta = targetAddr;
-                    WriteProcessMemory(ctx.hProcess, (LPVOID)(ctx.playerAddr + 0x290), &ta, 4, NULL);
-                    WriteProcessMemory(ctx.hProcess, (LPVOID)(ctx.playerAddr + 0x478), &ta, 4, NULL);
-                }
+                // NOTE: do NOT write lp+0x294/0x484 here — experiment (2026-09-24)
+                // proved those writes BLOCK the attack: flag 8 + Enter worked
+                // (278->159 in one hit) without them, but with them HP never drops.
                 SendAttackEnter(gw);
                 attackCount++;
                 lastAttackTick = now;
                 attackState = 3;
                 attackStepTick = now;
             } else {
-                // No sword yet, retry from step 0
-                attackState = 0;
+                // Cursor is on the target but the game offers no attack (NPC,
+                // friendly, or not reachable). Retry a few times, then DROP the
+                // target instead of looping here forever.
+                noSwordTries++;
+                if (noSwordTries >= MAX_NO_SWORD_TRIES) {
+                    DebugLog("[ATTACK] No attack flag on '%S' after %d tries (not attackable?) - skipping",
+                             targetName.c_str(), noSwordTries);
+                    lastFailedAddr = targetAddr;
+                    targetAddr = 0;
+                    attackState = 0;
+                    attackCount = 0;
+                    noSwordTries = 0;
+                    return;
+                }
+                attackState = 0;  // no sword yet, reposition cursor and retry
             }
             break;
         }
@@ -153,6 +179,7 @@ public:
     // Config
     bool  enabled = false;
     DWORD targetAddr = 0;
+    DWORD lastFailedAddr = 0;   // set once when a target was dropped as unattackable (Targeter parks it)
     int   globalCooldownMs = 1500;
     std::vector<SkillEntry> skills;
 
@@ -223,19 +250,21 @@ private:
     bool  killedLogged = false;
     int   attackCount = 0;
     int   lastCheckedHp = 0;
+    int   noSwordTries = 0;
     std::wstring targetName;
     float targetGX = 0, targetGY = 0;
 
-    static constexpr DWORD GM_PTR_OFFSET        = 0x00D387AC;
+    static constexpr DWORD GM_PTR_OFFSET        = 0x00D8F98C;
     static constexpr DWORD GM_OFFSET            = 0x14;
-    static constexpr DWORD CURSOR_OFFSET        = 0x123C;
+    static constexpr DWORD CURSOR_OFFSET        = 0x1244;
     static constexpr DWORD CUR_X_OFFSET         = 0x08;
     static constexpr DWORD CUR_Y_OFFSET         = 0x0A;
     static constexpr DWORD CUR_RAW_X_OFFSET     = 0x10;
     static constexpr DWORD CUR_RAW_Y_OFFSET     = 0x14;
     static constexpr DWORD CUR_ACTION_OFFSET    = 0x7C;
-    static constexpr DWORD ENT_HP_OFFSET        = 0x10C;
+    static constexpr DWORD ENT_HP_OFFSET        = 0x110;
     static constexpr int   CURSOR_ACTION_ATTACK = 8;
+    static constexpr int   MAX_NO_SWORD_TRIES   = 5;   // ~1.5s before we drop an unattackable target
 
     static int ReadInt(HANDLE hProc, DWORD addr) {
         int val = 0; SIZE_T r = 0;
@@ -274,7 +303,7 @@ private:
         SetForegroundWindow(gw);
         AttachThreadInput(myTid, fgTid, FALSE);
         keybd_event(VK_RETURN, 0, 0, 0);
-        Sleep(30);
+        Sleep(80);   // 30ms was too short in tests; 80ms proven to land hits
         keybd_event(VK_RETURN, 0, KEYEVENTF_KEYUP, 0);
     }
 };

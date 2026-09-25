@@ -32,10 +32,10 @@ Bot de automação para Warspear Online (cliente 32-bit, private server). Funcio
 | Módulo | Descrição |
 |--------|-----------|
 | **Targeter** | Seleciona mob com filtros (All/ByName/ByDistance), mantém alvo |
-| **Attacker** | Ataca via HandleMoveOrAction + detecção de espada + Enter remoto |
+| **Attacker** | Ataca: escreve cursor no tile do mob, confere espada (flag 8) + Enter |
 | **Healer** | Cura player selecionado via target (timer configurável) |
-| **Follower** | Segue um player específico com walk flag + Enter local |
-| **Looter** | Coleta corpos: caminha até corpse + HandleMoveOrAction + Enter |
+| **Follower** | Segue um player: escreve cursor no tile dele + Enter |
+| **Looter** | Coleta corpos: caminha até corpse (cursor + Enter) |
 | **Extra** | Anti-AFK, auto-revive, auto-sell, auto-repair |
 
 ---
@@ -60,29 +60,34 @@ O bot possui um console de debug que mostra informações em tempo real sobre to
 ### Cadeia de Ponteiros Principal
 
 ```
-warspear.exe + 0x00D387AC  →  sysInstance (System Instance)
+warspear.exe + 0x00D8F98C  →  sysInstance (System Instance)
 sysInstance  + 0x14        →  GM (GameManager)
 GM + 0x40                  →  player (LocalPlayer)
+GM + 0x3C                  →  entity tree header (+0x00 = root)
+GM + 0x1244                →  cursor struct
 ```
+
+> **Atualizado após o patch do jogo.** O ponteiro antigo era `0x00D387AC`.
+> Se o Connect falhar com *"Cannot read game memory"*, confirme estes ponteiros.
 
 ### Offsets de Entidade
 
 | Offset | Tamanho | Descrição |
 |--------|---------|-----------|
 | `+0x00` | DWORD | VTable (identificador de classe) |
-| `+0x10` | WORD | Raw X (ler como short, valor direto) |
-| `+0x14` | WORD | Raw Y (ler como short, valor direto) |
+| `+0x10` | DWORD | X do mundo (16.16 → valor/65536; tiles = /24) |
+| `+0x14` | DWORD | Y do mundo (16.16 → valor/65536; tiles = /24) |
 | `+0x58` | DWORD | Ponteiro para nome (UTF-16LE) |
-| `+0x060` | DWORD | Tamanho do nome |
-| `+0x090` | DWORD | Tipo (1=player, 2=outro) |
-| `+0x10C` | DWORD | HP atual |
-| `+0x110` | DWORD | HP máximo |
-| `+0x114` | DWORD | Mana atual |
-| `+0x118` | DWORD | Mana máximo |
-| `+0x290` | DWORD | Alvo atual do jogador |
-| `+0x2E0` | DWORD | Nível do mob/jogador |
-| `+0x3ED` | BYTE  | Class ID (ver tabela abaixo) |
-| `+0x478` | DWORD | Alvo secundário |
+| `+0x60` | DWORD | Tamanho do nome |
+| `+0x90` | DWORD | Tipo (1=player, 2=outro — não separa NPC de mob hostil) |
+| `+0x110` | DWORD | HP atual (morto = valor negativo, ex. -79) |
+| `+0x114` | DWORD | HP máximo |
+| `+0x118` | DWORD | Mana atual |
+| `+0x11C` | DWORD | Mana máximo |
+| `+0x294` | DWORD | Alvo atual (LEITURA ok; **NUNCA escrever** — ver nota) |
+| `+0x2E4` | BYTE  | Nível do mob/jogador |
+| `+0x3F9` | BYTE  | Class ID (ver tabela abaixo) |
+| `+0x484` | DWORD | Alvo secundário (**NUNCA escrever** — ver nota) |
 
 ### Class IDs
 
@@ -112,7 +117,7 @@ GM + 0x40                  →  player (LocalPlayer)
 
 ### Cursor / Ações
 
-O cursor do jogo é acessível via `GM + 0x123C`:
+O cursor do jogo é acessível via `GM + 0x1244` (antes `0x123C`):
 
 | Offset | Tamanho | Descrição |
 |--------|---------|-----------|
@@ -122,7 +127,10 @@ O cursor do jogo é acessível via `GM + 0x123C`:
 | `+0x14` | DWORD | Raw Y (escrita para mover cursor) |
 | `+0x7C` | DWORD | Walk flag / Cursor action flag |
 
-**Walk flag:** Escrever `0x10` em `cursor+0x7C` faz o personagem andar até a posição do cursor.
+**Andar:** escrever as coordenadas **não** move o personagem — só reposiciona o
+cursor e o jogo recalcula a flag. Para andar, escreva o cursor no tile e envie **Enter**
+(é o que Follower e Looter fazem). Escrever `0x10` em `+0x7C` é inútil: o jogo
+sobrescreve a flag em poucos ms.
 
 **Cursor action flags:**
 
@@ -135,9 +143,12 @@ O cursor do jogo é acessível via `GM + 0x123C`:
 **Como funciona o cursor:**
 1. Escrever tile X/Y em `cursor+0x08` e `cursor+0x0A` (WORD)
 2. Escrever raw X/Y em `cursor+0x10` e `cursor+0x14` (DWORD = tile * 0x180000)
-3. Escrever walk flag `0x10` em `cursor+0x7C` para movimentar
-4. Chamar `HandleMoveOrAction` via `CreateRemoteThread` para o jogo processar
-5. Verificar `cursor_action == 8` (espada) antes de confirmar ataque
+3. **Não é preciso chamar função nenhuma** — o jogo recalcula `cursor+0x7C` sozinho
+   em poucos ms (< 50 ms) a partir das coordenadas que você escreveu
+4. Verificar `cursor_action == 8` (espada) antes de confirmar ataque
+
+> `HandleMoveOrAction` (`0x00A3F480`) **foi desabilitado**: o endereço morreu no patch
+> e chamá-lo quebrava o bot. Chamá-lo é hoje um no-op em `RemoteHandleMoveOrAction`.
 
 ### Árvore de Entidades (BST)
 
@@ -153,10 +164,28 @@ O cursor do jogo é acessível via `GM + 0x123C`:
 
 | VTable | Tipo |
 |--------|------|
-| `0x00C80F9C` | Local Player |
-| `0x00C8137C` | NPC (humanoide) |
-| `0x00C81490` | Mob (bestiário) - inclui corpses (HP < 0) |
-| `0x00C4FC5C` | Objeto/Spawn (drops, objetos interativos) |
+| `0x00CD12D0` | Local Player |
+| `0x00CD16BC` | Humanoide (NPC, jogadores, mobs humanoides) |
+| `0x00CD17B4` | Bestiário (Aranha, Javali, etc.) |
+| `0x00000000` | Corpo — desconhecido; cadáveres são detectados por `hp < 0` |
+
+Vtables verificadas ao vivo em `warspear.exe` após o patch.
+
+### Lista de NPCs editável
+
+NPCs são separados de mobs **pelo nome**, lista em `config\npc_names.json`
+(re-lida a cada Connect). Nome com `*` no final = prefixo:
+
+```json
+{
+  "_ajuda": "Nomes normais = igualdade exata. 'Vendedor*' = prefixo.",
+  "npcs": ["Mestre de Armas", "Guarda*", "Aranha feroz"]
+}
+```
+
+Mob hostil listado aqui **não será atacado**. Mob hostil ausente daqui vira
+"alvo" e, se o cursor não mostrar a espada, o Attacker desiste em ~1.5 s e
+**estaciona o alvo por 60 s** (evita o travamento eterno antigo).
 
 ### Coordenadas do Mundo
 
@@ -166,26 +195,36 @@ O cursor do jogo é acessível via `GM + 0x123C`:
 
 ### Funções Relevantes
 
-| Endereço | Função | Descrição |
-|----------|--------|-----------|
-| `0x00A3F480` | `HandleMoveOrAction` | Processa movimento/ação do cursor (__thiscall localPlayer, 0) |
-| `0x00A3E0F0` | `HandleSkillOrUse` | Processa skill/uso (__thiscall localPlayer, entityPtr) |
+| Endereço | Função | Status |
+|----------|--------|--------|
+| `0x00000000` | `HandleMoveOrAction` (antes `0x00A3F480`) | **MORTO no patch — no-op** |
+| `0x00000000` | `HandleSkillOrUse` (antes `0x00A3E0F0`) | **MORTO no patch — não usado** |
+
+Não há mais chamada ao jogo para ações: tudo passa por escrita no cursor +
+tecla real (Enter).
 
 ---
 
 ## Como o Ataque Funciona
 
-1. **Targeter** seleciona mob mais próximo com HP > 0 (com filtros: All/ByName/ByDistance)
-2. **Attacker** escreve coordenadas do mob no cursor via `WriteProcessMemory`
-3. Chama `HandleMoveOrAction` via `CreateRemoteThread` — o jogo processa a posição do cursor
-4. Lê `cursor_action` em `cursor_ptr + 0x7C`:
-   - Se `== 8` (ATTACK/espada detectada) → seta alvo + envia Enter → ataque
-   - Se `!= 8` → continua tentando (retries)
-5. **Looter** caminha até corpse (walk flag 0x10) + `HandleMoveOrAction` + Enter para coletar
+1. **Targeter** seleciona mob mais próximo com HP > 0 (filtros: All/ByName/ByDistance)
+2. **Attacker** escreve o tile do mob no cursor (`+0x08/+0x0A` WORD, `+0x10/+0x14` DWORD)
+3. Espera 200 ms e lê `cursor+0x7C` — o jogo recalcula sozinho:
+   - `== 8` (espada) → envia **Enter** (via `AttachThreadInput` + `keybd_event`,
+     exige janela do jogo em primeiro plano)
+   - `!= 8` → tenta de novo; após **5 falhas** derruba o alvo e o estaciona 60 s
+
+> **Crítico (verificado em 24/09/2026):** o ataque **NÃO** deve escrever o alvo em
+> `lp+0x294`/`lp+0x484` antes do Enter — isso **bloqueia o golpe** (flag 8 + Enter
+> sem escrita drenou 278→159 num golpe; com escrita, HP não muda). O Enter sozinho
+> com cursor no mob (flag 8) e personagem adjacente funciona.
+4. **Looter** detecta corpses por `hp < 0`, escreve cursor no tile do loot e envia Enter
 
 ### Por que não PostMessage?
 
-O Warspear Online usa DirectInput/raw input — `PostMessage` com `WM_KEYDOWN` não funciona. A solução é usar `CreateRemoteThread` para chamar funções do próprio jogo (`HandleMoveOrAction`) e `AttachThreadInput` + `keybd_event(VK_RETURN)` para gerar input real.
+O Warspear Online usa DirectInput/raw input — `PostMessage` com `WM_KEYDOWN` não funciona.
+A solução é `AttachThreadInput` + `keybd_event(VK_RETURN)` para gerar input real.
+(O cursor não precisa de input: basta escrever as coordenadas em memória.)
 
 ---
 
@@ -202,12 +241,16 @@ WS-BOT/
 │   └── game_memory.h           ← Offsets, estruturas, cursor struct
 │
 ├── modules/
-│   ├── Targeter.h              ← Seleção de alvo (All/ByName/ByDistance)
-│   ├── Attacker.h              ← Ataque via HandleMoveOrAction + sword detection
+│   ├── Targeter.h              ← Seleção de alvo + estaciona alvos sem espada (60s)
+│   ├── Attacker.h              ← Ataque: cursor → flag 8 → alvo+Enter (5 tentativas)
 │   ├── Healer.h                ← Cura player selecionado (target + timer)
-│   ├── Looter.h                ← Auto-loot (walk + HandleMoveOrAction)
-│   ├── Follower.h              ← Seguir player (walk flag + Enter local)
+│   ├── Looter.h                ← Auto-loot (cursor no corpse + Enter)
+│   ├── Follower.h              ← Seguir player (cursor no tile + Enter)
 │   └── Extra.h                 ← Anti-AFK, auto-revive, auto-sell, auto-repair
+│
+├── config/
+│   ├── *.ini                   ← Persistência dos módulos (ModuleManager)
+│   └── npc_names.json          ← Lista editável de NPCs (re-lida no Connect)
 │
 ├── build-controller-local.bat  ← Script de compilação do controller
 └── README.md
@@ -304,4 +347,4 @@ Cada módulo é um nó pai que expande/recolhe com "+". Cliques nos filhos alter
 
 ### DLL (Legacy)
 
-`warspear-bot23.dll` é uma versão legada que usava arrow-key navigation via shared memory. O controller atual não precisa dela — usa `WriteProcessMemory` + `CreateRemoteThread` diretamente.
+`warspear-bot23.dll` é uma versão legada que usava arrow-key navigation via shared memory. O controller atual não precisa dela — tudo roda via `ReadProcessMemory`/`WriteProcessMemory` + `keybd_event` local (`AttachThreadInput`). A DLL continua sendo injetável pelos botões do controller, mas o fluxo de ataque/loot/follow vive no controller.

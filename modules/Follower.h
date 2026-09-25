@@ -67,13 +67,13 @@ public:
         DebugLog("[FOLLOW] Following '%S' dist=%.1f -> tile(%d,%d)", targetName.c_str(), dist, tileX, tileY);
 
         DWORD gmPtr = 0; SIZE_T r = 0;
-        ReadProcessMemory(ctx.hProcess, (LPCVOID)0x00D387AC, &gmPtr, 4, &r);
+        ReadProcessMemory(ctx.hProcess, (LPCVOID)0x00D8F98C, &gmPtr, 4, &r);
         if (gmPtr > 0x1000) {
             DWORD gm = 0;
             ReadProcessMemory(ctx.hProcess, (LPCVOID)(gmPtr + 0x14), &gm, 4, &r);
             if (gm > 0x1000) {
                 DWORD cur = 0;
-                ReadProcessMemory(ctx.hProcess, (LPCVOID)(gm + 0x123C), &cur, 4, &r);
+                ReadProcessMemory(ctx.hProcess, (LPCVOID)(gm + 0x1244), &cur, 4, &r);
                 if (cur > 0x1000) {
                     int rawX = (int)tileX * 0x180000;
                     int rawY = (int)tileY * 0x180000;

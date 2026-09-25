@@ -31,7 +31,7 @@
 // Game constants
 // ============================================================
 namespace Game {
-    constexpr DWORD GM_PTR      = 0x00D387AC;
+    constexpr DWORD GM_PTR      = 0x00D8F98C;
     constexpr DWORD GM_OFFSET   = 0x14;
     constexpr DWORD LP_OFFSET   = 0x40;
     constexpr DWORD ENTITY_TREE = 0x3C;
@@ -46,18 +46,18 @@ namespace Game {
     constexpr DWORD ENT_NAME_PTR  = 0x58;
     constexpr DWORD ENT_NAME_LEN  = 0x60;
     constexpr DWORD ENT_TYPE_IND  = 0x090;
-    constexpr DWORD ENT_HP        = 0x10C;
-    constexpr DWORD ENT_MAX_HP    = 0x110;
-    constexpr DWORD ENT_MANA      = 0x114;
-    constexpr DWORD ENT_MAX_MANA  = 0x118;
-    constexpr DWORD ENT_LEVEL     = 0x2E0;
-    constexpr DWORD ENT_CLASS_IND = 0x3ED;
-    constexpr DWORD VT_PLAYER  = 0x00C80F9C;
-    constexpr DWORD VT_BEAST   = 0x00C81490;
-    constexpr DWORD VT_CORPSE  = 0x00C4FC5C;
+    constexpr DWORD ENT_HP        = 0x110;
+    constexpr DWORD ENT_MAX_HP    = 0x114;
+    constexpr DWORD ENT_MANA      = 0x118;
+    constexpr DWORD ENT_MAX_MANA  = 0x11C;
+    constexpr DWORD ENT_LEVEL     = 0x2E4;
+    constexpr DWORD ENT_CLASS_IND = 0x3F9;
+    constexpr DWORD VT_PLAYER  = 0x00CD12D0;
+    constexpr DWORD VT_BEAST   = 0x00CD17B4;
+    constexpr DWORD VT_CORPSE  = 0x00000000;   // unknown after update (unused)
     constexpr DWORD OBJ_OBJECT_ID  = 0x120;
     constexpr DWORD OBJ_TYPE_ID    = 0x124;
-    constexpr DWORD CURSOR_OFFSET  = 0x123C;
+    constexpr DWORD CURSOR_OFFSET  = 0x1244;
     constexpr DWORD CUR_X          = 0x08;
     constexpr DWORD CUR_Y          = 0x0A;
     constexpr DWORD CUR_RAW_X      = 0x10;
@@ -227,7 +227,26 @@ static const wchar_t* NPC_NAMES[] = {
     L"Citizen", L"Gregory", L"Moraes", L"Butcher Norberto"
 };
 static const int NPC_COUNT = sizeof(NPC_NAMES) / sizeof(NPC_NAMES[0]);
-bool IsNPC(const std::wstring& n) { for (int i=0;i<NPC_COUNT;i++) if(n==NPC_NAMES[i]) return true; return false; }
+
+// NPC names: built-in defaults below, replaced at runtime by config\npc_names.json
+static std::vector<std::wstring>& NpcNames() {
+    static std::vector<std::wstring> names;
+    static bool seeded = false;
+    if (!seeded) { seeded = true; for (int i = 0; i < NPC_COUNT; i++) names.push_back(NPC_NAMES[i]); }
+    return names;
+}
+
+// "Nome Exato" -> exact match, "Prefixo*" -> prefix match
+bool IsNPC(const std::wstring& n) {
+    for (auto& s : NpcNames()) {
+        if (s.empty()) continue;
+        if (s.back() == L'*') {
+            size_t pl = s.size() - 1;
+            if (n.size() >= pl && n.compare(0, pl, s, 0, pl) == 0) return true;
+        } else if (s == n) return true;
+    }
+    return false;
+}
 
 const wchar_t* GetClassName(int classId) {
     switch(classId) {
@@ -262,6 +281,116 @@ void DebugLog(const char* fmt, ...) {
         SendMessageA(g_hDebugEdit, EM_SETSEL, len + (int)strlen(buf), len + (int)strlen(buf));
         SendMessageA(g_hDebugEdit, EM_SCROLLCARET, 0, 0);
     }
+}
+
+// ============================================================
+// config\npc_names.json loader (re-read on Connect)
+// {"_ajuda":"...", "npcs":["Guarda", "Capitao*"]}
+// ============================================================
+static void AppendUtf8(std::string& s, unsigned cp) {
+    if (cp < 0x80) s += (char)cp;
+    else if (cp < 0x800) { s += (char)(0xC0 | (cp >> 6)); s += (char)(0x80 | (cp & 0x3F)); }
+    else { s += (char)(0xE0 | (cp >> 12)); s += (char)(0x80 | ((cp >> 6) & 0x3F)); s += (char)(0x80 | (cp & 0x3F)); }
+}
+
+static std::wstring Utf8OrAnsiToWide(const std::string& s) {
+    if (s.empty()) return std::wstring();
+    UINT cp = CP_UTF8; DWORD fl = MB_ERR_INVALID_CHARS;
+    int n = MultiByteToWideChar(cp, fl, s.c_str(), (int)s.size(), NULL, 0);
+    if (n <= 0) { cp = CP_ACP; fl = 0; n = MultiByteToWideChar(cp, fl, s.c_str(), (int)s.size(), NULL, 0); }
+    if (n <= 0) return std::wstring();
+    std::wstring w(n, L'\0');
+    MultiByteToWideChar(cp, fl, s.c_str(), (int)s.size(), &w[0], n);
+    return w;
+}
+
+static bool LoadNpcNames(const wchar_t* path) {
+    NpcNames(); // make sure built-in defaults exist even if the file fails
+
+    HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        DebugLog("[NPC] %S not found - using built-in list (%d names)", path, (int)NpcNames().size());
+        return false;
+    }
+    LARGE_INTEGER sz{};
+    if (!GetFileSizeEx(h, &sz) || sz.QuadPart <= 0 || sz.QuadPart > 1024 * 1024) {
+        CloseHandle(h); DebugLog("[NPC] %S empty or too big", path); return false;
+    }
+    std::string raw((size_t)sz.QuadPart, '\0');
+    DWORD got = 0;
+    BOOL ok = ReadFile(h, &raw[0], (DWORD)raw.size(), &got, NULL);
+    CloseHandle(h);
+    if (!ok || !got) return false;
+    raw.resize(got);
+
+    std::vector<std::wstring> names;
+    const char* q = raw.c_str();
+    const char* end = q + raw.size();
+
+    while (q < end && *q != '[') {              // find the array (skips quoted keys)
+        if (*q == '"') { q++; while (q < end && *q != '"') { if (*q == '\\') q++; q++; } }
+        else q++;
+    }
+    if (q >= end) { DebugLog("[NPC] no [...] array in %S - keeping built-in list", path); return false; }
+    q++;
+
+    while (q < end) {
+        unsigned char c = (unsigned char)*q;
+        if (c <= ' ' || c == ',') { q++; continue; }
+        if (c == ']') break;
+        if (q + 1 < end && q[0] == '/' && q[1] == '/') { while (q < end && *q != '\n') q++; continue; }
+        if (c != '"') { q++; continue; }
+        q++;
+        std::string item;
+        while (q < end && *q != '"') {
+            if (*q == '\\' && q + 1 < end) {
+                q++;
+                switch (*q) {
+                    case 'n': item += '\n'; break;
+                    case 't': item += '\t'; break;
+                    case 'r': item += '\r'; break;
+                    case 'u': {
+                        unsigned cp = 0; bool hex = true;
+                        for (int k = 1; k <= 4 && q + k < end; k++) {
+                            char hc = q[k]; cp <<= 4;
+                            if (hc >= '0' && hc <= '9') cp |= hc - '0';
+                            else if (hc >= 'a' && hc <= 'f') cp |= hc - 'a' + 10;
+                            else if (hc >= 'A' && hc <= 'F') cp |= hc - 'A' + 10;
+                            else { hex = false; break; }
+                        }
+                        if (hex && cp >= 0x20 && !(cp >= 0xD800 && cp <= 0xDFFF)) AppendUtf8(item, cp);
+                        q += 4;
+                        break;
+                    }
+                    default: item += *q; break;
+                }
+                q++;
+            } else item += *q++;
+        }
+        if (q < end) q++;
+        size_t a = item.find_first_not_of(" \t\r\n");
+        size_t b = item.find_last_not_of(" \t\r\n");
+        if (a == std::string::npos) continue;
+        std::wstring w = Utf8OrAnsiToWide(item.substr(a, b - a + 1));
+        if (w.empty()) continue;
+        bool dup = false;
+        for (auto& e : names) if (e == w) { dup = true; break; }
+        if (!dup) names.push_back(w);
+    }
+
+    if (names.empty()) { DebugLog("[NPC] no names parsed in %S - keeping built-in list", path); return false; }
+    NpcNames().swap(names);
+    DebugLog("[NPC] Loaded %d NPC names from npc_names.json", (int)NpcNames().size());
+    return true;
+}
+
+static void ReloadNpcNames() {
+    wchar_t dir[MAX_PATH];
+    GetModuleFileNameW(NULL, dir, MAX_PATH);
+    wchar_t* bs = wcsrchr(dir, L'\\'); if (bs) *bs = 0;
+    wchar_t path[MAX_PATH];
+    swprintf_s(path, L"%s\\config\\npc_names.json", dir);
+    LoadNpcNames(path);
 }
 
 void OpenDebugConsole(HWND parent) {
@@ -425,7 +554,7 @@ void TraverseTree(DWORD node, std::vector<EntityData>& entities, std::vector<Cor
     else if (vtable==Game::VT_BEAST) e.type=4;
     else if (IsNPC(e.name)) e.type=3;
     else e.type=2;
-    e.level=Read<int>(objPtr+Game::ENT_LEVEL);
+    e.level=Read<BYTE>(objPtr+Game::ENT_LEVEL);
     e.classId=Read<BYTE>(objPtr+Game::ENT_CLASS_IND);
     e.distance=CalcDist(selfX,selfY,e.x,e.y);
     if (e.hp==0&&e.maxHp==0) return;
@@ -446,7 +575,7 @@ bool ReadGameState(float& sx, float& sy, int& hp, int& mhp, int& mn, int& mmn,
     sx=Read<int>(lp+Game::ENT_RAW_X)/65536.0f; sy=Read<int>(lp+Game::ENT_RAW_Y)/65536.0f;
     hp=Read<int>(lp+Game::ENT_HP); mhp=Read<int>(lp+Game::ENT_MAX_HP);
     mn=Read<int>(lp+Game::ENT_MANA); mmn=Read<int>(lp+Game::ENT_MAX_MANA);
-    level=Read<int>(lp+Game::ENT_LEVEL);
+    level=Read<BYTE>(lp+Game::ENT_LEVEL);
     classId=Read<BYTE>(lp+Game::ENT_CLASS_IND);
     DWORD np2=Read<DWORD>(lp+Game::ENT_NAME_PTR); int nl=Read<int>(lp+Game::ENT_NAME_LEN);
     if(nl>0&&nl<64&&np2>0x1000){wchar_t w[64]={};for(int i=0;i<nl;i++){wchar_t c=Read<wchar_t>(np2+i*2);if(c==0)break;w[i]=c;}name=w;}
@@ -595,32 +724,12 @@ void RemoteSendEnter() {
 // Remote game function calls (for Attacker)
 // ============================================================
 
-// Call HandleMoveOrAction (0x00A3F480) __thiscall(localPlayer, 0) in the game process
-// This forces the game to process cursor position and update +0x7C action flag
+// HandleMoveOrAction is DISABLED: the old address (0x00A3F480) is dead after the
+// game update and calling it would crash the client. Verified: the game now
+// recomputes cursor+0x7C by itself from the cursor struct (write cursor tile/raw,
+// wait ~1 frame, read +0x7C). Kept so GameContext still has a valid function pointer.
 void RemoteHandleMoveOrAction(DWORD localPlayerAddr) {
-    if (!g_hProcess || localPlayerAddr <= 0x1000) return;
-
-    // Shellcode:
-    //   mov ecx, [esp+4]       ; ecx = localPlayer (thiscall)
-    //   push 0                 ; param1 = 0
-    //   call HandleMoveOrAction
-    //   ret 4                  ; clean lpParameter from CreateRemoteThread
-    constexpr DWORD FN_HMOA = 0x00A3F480;
-    BYTE sc[16];
-    int i = 0;
-    sc[i++] = 0x8B; sc[i++] = 0x4C; sc[i++] = 0x24; sc[i++] = 0x04;  // mov ecx, [esp+4]
-    sc[i++] = 0x6A; sc[i++] = 0x00;                                    // push 0
-    sc[i++] = 0xB8;                                                    // mov eax, imm32
-    *(DWORD*)(sc + i) = FN_HMOA; i += 4;
-    sc[i++] = 0xFF; sc[i++] = 0xD0;                                    // call eax
-    sc[i++] = 0xC2; sc[i++] = 0x04; sc[i++] = 0x00;                   // ret 4
-
-    LPVOID remote = VirtualAllocEx(g_hProcess, NULL, i, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-    if (!remote) return;
-    WriteProcessMemory(g_hProcess, remote, sc, i, NULL);
-    HANDLE ht = CreateRemoteThread(g_hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)remote, (LPVOID)localPlayerAddr, 0, NULL);
-    if (ht) { WaitForSingleObject(ht, 1000); CloseHandle(ht); }
-    VirtualFreeEx(g_hProcess, remote, 0, MEM_RELEASE);
+    (void)localPlayerAddr;
 }
 
 // ============================================================
@@ -643,7 +752,7 @@ GameContext BuildContext() {
         ctx.selfMaxHp = Read<int>(g_playerAddr + Game::ENT_MAX_HP);
         ctx.selfMana = Read<int>(g_playerAddr + Game::ENT_MANA);
         ctx.selfMaxMana = Read<int>(g_playerAddr + Game::ENT_MAX_MANA);
-        ctx.selfLevel = Read<int>(g_playerAddr + Game::ENT_LEVEL);
+        ctx.selfLevel = Read<BYTE>(g_playerAddr + Game::ENT_LEVEL);
         ctx.selfClassId = Read<BYTE>(g_playerAddr + Game::ENT_CLASS_IND);
         DWORD np = Read<DWORD>(g_playerAddr + Game::ENT_NAME_PTR);
         int nl = Read<int>(g_playerAddr + Game::ENT_NAME_LEN);
@@ -1349,6 +1458,13 @@ void UpdateUI() {
     GameContext ctx = BuildContext();
     G->modMgr.TickAll(ctx);
 
+    // Attacker gave up on a target that never offered the attack flag (NPC/friendly)
+    if (G->attacker.lastFailedAddr > 0x1000) {
+        G->targeter.MarkSkipped(G->attacker.lastFailedAddr);
+        DebugLog("[TARGETER] Parking unattackable target 0x%08X for 60s", G->attacker.lastFailedAddr);
+        G->attacker.lastFailedAddr = 0;
+    }
+
     // Sync AFTER TickAll so Targeter has already updated selectedAddr
     if (G->targeter.enabled && G->targeter.selectedAddr > 0x1000)
         G->attacker.targetAddr = G->targeter.selectedAddr;
@@ -1397,6 +1513,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         wchar_t* bs = wcsrchr(cfgDir, L'\\'); if (bs) *bs = 0;
         wcscat(cfgDir, L"\\config");
         G->modMgr.LoadAll(cfgDir);
+        ReloadNpcNames();
 
         RefreshAccordion();
         SwitchTab(TAB_CONFIG);
@@ -1501,6 +1618,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 swprintf(wtitle,128,L"%s [Lv.%d %s]", name.c_str(), level, GetClassName(classId));
                 SetWindowTextW(hWnd, wtitle);
                 DebugLog("[CONNECT] SUCCESS - %S Lv.%d", name.c_str(), level);
+                ReloadNpcNames();   // re-read config\npc_names.json on every Connect
                 G->modMgr.StartAll();
                 if (!m.empty()) G->attacker.targetAddr = m[0].objAddr;
                 if (!p.empty()) { G->follower.targetAddr = p[0].objAddr; G->follower.targetName = p[0].name; }

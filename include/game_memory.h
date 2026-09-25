@@ -12,19 +12,21 @@
 namespace Game {
 
 // ---- Key addresses ----
-constexpr DWORD DAT_GetGlobalSystemInstance = 0x00D387AC;  // read pointer from here → system instance
+constexpr DWORD DAT_GetGlobalSystemInstance = 0x00D8F98C;  // read pointer from here → system instance
 constexpr DWORD OFFSET_GameManager         = 0x14;        // system + 0x14 = gameManager
 constexpr DWORD OFFSET_EntityTreeHeader    = 0x3C;        // gameManager + 0x3C = entity tree header
 constexpr DWORD OFFSET_LocalPlayer         = 0x40;        // gameManager + 0x40 = localPlayer ptr
+constexpr DWORD OFFSET_CursorPtr           = 0x1244;      // gameManager + 0x1244 = cursor object
 
 // ---- VTable IDs ----
-constexpr DWORD VTABLE_LOCAL_PLAYER = 0x00C80F9C;
-constexpr DWORD VTABLE_HUMANOID     = 0x00C8137C;  // players, NPCs, humanoid mobs
-constexpr DWORD VTABLE_BEAST        = 0x00C81490;  // animal mobs (Javali, Boneca, etc.)
+constexpr DWORD VTABLE_LOCAL_PLAYER = 0x00CD12D0;
+constexpr DWORD VTABLE_HUMANOID     = 0x00CD16BC;  // players, NPCs, humanoid mobs
+constexpr DWORD VTABLE_BEAST        = 0x00CD17B4;  // animal mobs (Javali, Boneca, etc.)
 
 // ---- Function addresses ----
-constexpr DWORD FN_HandleMoveOrAction = 0x00A3F480;  // __thiscall(localPlayer, param1)
-constexpr DWORD FN_HandleSkillOrUse   = 0x00A3E0F0;  // __thiscall(localPlayer, entityPtr)
+// STALE after game update: not found yet. Do NOT call (see README).
+constexpr DWORD FN_HandleMoveOrAction = 0x00000000;  // unknown
+constexpr DWORD FN_HandleSkillOrUse   = 0x00000000;  // unknown
 
 // ---- Entity object offsets ----
 constexpr int ENT_VTABLE       = 0x000;
@@ -35,10 +37,11 @@ constexpr int ENT_SUB_VTABLE   = 0x054;  // secondary vtable
 constexpr int ENT_NAME_PTR     = 0x058;  // pointer to name string
 constexpr int ENT_NAME_LEN     = 0x060;  // name length (in chars)
 constexpr int ENT_NAME         = 0x064;  // wide string name (UTF-16LE)
-constexpr int ENT_HP           = 0x10C;  // current HP
-constexpr int ENT_MAX_HP       = 0x110;  // max HP
-constexpr int ENT_MANA         = 0x114;  // current mana
-constexpr int ENT_MAX_MANA     = 0x118;  // max mana
+constexpr int ENT_LEVEL       = 0x2E4;  // BYTE: entity level
+constexpr int ENT_HP           = 0x110;  // current HP
+constexpr int ENT_MAX_HP       = 0x114;  // max HP
+constexpr int ENT_MANA         = 0x118;  // current mana
+constexpr int ENT_MAX_MANA     = 0x11C;  // max mana
 
 // ---- Entity tree node offsets ----
 constexpr int NODE_PARENT  = 0x00;
@@ -164,7 +167,7 @@ inline DWORD GetCursorPtr(DWORD processHandle) {
     DWORD gm = GetGameManager();
     if (gm == 0) return 0;
     DWORD cur = 0; SIZE_T r = 0;
-    ReadProcessMemory((HANDLE)processHandle, (LPCVOID)(gm + 0x123C), &cur, 4, &r);
+    ReadProcessMemory((HANDLE)processHandle, (LPCVOID)(gm + OFFSET_CursorPtr), &cur, 4, &r);
     return (r == 4) ? cur : 0;
 }
 

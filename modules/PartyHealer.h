@@ -40,8 +40,8 @@ public:
                 DWORD written = 0;
                 DWORD lp = ctx.playerAddr;
                 if (lp > 0x1000) {
-                    WriteProcessMemory(ctx.hProcess, (LPVOID)(lp + 0x290), &target, 4, &written);
-                    WriteProcessMemory(ctx.hProcess, (LPVOID)(lp + 0x478), &target, 4, &written);
+                    WriteProcessMemory(ctx.hProcess, (LPVOID)(lp + 0x294), &target, 4, &written);
+                    WriteProcessMemory(ctx.hProcess, (LPVOID)(lp + 0x484), &target, 4, &written);
                 }
                 Sleep(100);
 

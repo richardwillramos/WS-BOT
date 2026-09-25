@@ -159,7 +159,7 @@ static std::vector<TreeItemData> g_treeItems;
 
 // Tree item handles per module [module][subItem]
 static HTREEITEM g_hTreeParent[6] = {};
-static HTREEITEM g_hTreeChild[6][6] = {};
+static HTREEITEM g_hTreeChild[6][10] = {};
 static int g_treeChildCount[6] = {};
 
 // Quick actions tab
@@ -1031,8 +1031,8 @@ void RefreshTree() {
     TreeSetItemText(MID_TARGETER, 1, G->targeter.retargetOnNearby ? L"Retarget on nearby: ON" : L"Retarget on nearby: OFF");
     swprintf(b,256,L"Max distance: %d", (int)G->targeter.maxDistance);
     TreeSetItemText(MID_TARGETER, 2, b);
-    { const wchar_t* fm[] = { L"All", L"By Name", L"By Distance" };
-    swprintf(b,256,L"Filter: %s", fm[G->targeter.filterMode % 3]);
+    { const wchar_t* fm[] = { L"All", L"By Name", L"By Distance", L"Damaged" };
+    swprintf(b,256,L"Filter: %s", fm[G->targeter.filterMode % 4]);
     TreeSetItemText(MID_TARGETER, 3, b); }
     if (G->targeter.filterMode == 1 && !G->targeter.targetMobName.empty())
         swprintf(b,256,L"Mob Name: %s", G->targeter.targetMobName.c_str());
@@ -1060,6 +1060,11 @@ void RefreshTree() {
     TreeSetItemText(MID_HEALER, 4, G->healer.minHpFilter ? L"Min HP filter: ON" : L"Min HP filter: OFF");
     swprintf(b,256,L"Min HP%%: %d", (int)G->healer.minHpPct);
     TreeSetItemText(MID_HEALER, 5, b);
+    TreeSetItemText(MID_HEALER, 6, G->healer.selfHealEnabled ? L"Self Heal: ON" : L"Self Heal: OFF");
+    swprintf(b,256,L"Self HP%%: %d", (int)G->healer.selfHpPct);
+    TreeSetItemText(MID_HEALER, 7, b);
+    swprintf(b,256,L"Self key: %c", G->healer.selfHealKey);
+    TreeSetItemText(MID_HEALER, 8, b);
 
     TreeSetItemText(MID_FOLLOWER, 0, G->follower.enabled ? L"Status: true" : L"Status: false");
     if (G->follower.targetName.empty())
@@ -1078,6 +1083,8 @@ void RefreshTree() {
     TreeSetItemText(MID_LOOTER, 1, b);
     swprintf(b,256,L"Cooldown: %d ms", G->looter.cooldownMs);
     TreeSetItemText(MID_LOOTER, 2, b);
+    swprintf(b,256,L"Max distance: %d", (int)G->looter.lootMaxDistance);
+    TreeSetItemText(MID_LOOTER, 3, b);
 
     TreeSetItemText(MID_EXTRA, 0, G->extra.antiAfk ? L"Anti AFK: ON" : L"Anti AFK: OFF");
     TreeSetItemText(MID_EXTRA, 1, G->extra.autoRevive ? L"Auto Revive: ON" : L"Auto Revive: OFF");
@@ -1100,7 +1107,7 @@ void TreeHandleClick(NMTREEVIEWW* ntv) {
         case MID_TARGETER:
             if (td.subId == 0) G->targeter.enabled = !G->targeter.enabled;
             else if (td.subId == 1) G->targeter.retargetOnNearby = !G->targeter.retargetOnNearby;
-            else if (td.subId == 3) G->targeter.filterMode = (G->targeter.filterMode + 1) % 3;
+            else if (td.subId == 3) G->targeter.filterMode = (G->targeter.filterMode + 1) % 4;
             break;
         case MID_ATTACKER:
             if (td.subId == 0) G->attacker.enabled = !G->attacker.enabled;
@@ -1108,6 +1115,7 @@ void TreeHandleClick(NMTREEVIEWW* ntv) {
         case MID_HEALER:
             if (td.subId == 0) G->healer.enabled = !G->healer.enabled;
             else if (td.subId == 4) G->healer.minHpFilter = !G->healer.minHpFilter;
+            else if (td.subId == 6) G->healer.selfHealEnabled = !G->healer.selfHealEnabled;
             break;
         case MID_FOLLOWER:
             if (td.subId == 0) G->follower.enabled = !G->follower.enabled;
@@ -1144,6 +1152,8 @@ void TreeHandleClick(NMTREEVIEWW* ntv) {
             if (td.subId == 2) { v = ShowInputInt(g_hWnd, L"Cooldown (ms)", G->healer.cooldownMs); if(v>0) G->healer.cooldownMs = v; }
             else if (td.subId == 3) { v = ShowInputInt(g_hWnd, L"Heal Key (1-9)", G->healer.healKeyBind - 0x30); if(v>=1&&v<=9) G->healer.healKeyBind = 0x30+v; }
             else if (td.subId == 5) { v = ShowInputInt(g_hWnd, L"Min HP%", (int)G->healer.minHpPct); G->healer.minHpPct = (float)v; }
+            else if (td.subId == 7) { v = ShowInputInt(g_hWnd, L"Self HP%", (int)G->healer.selfHpPct); G->healer.selfHpPct = (float)v; }
+            else if (td.subId == 8) { v = ShowInputInt(g_hWnd, L"Self Heal Key (1-9)", G->healer.selfHealKey - 0x30); if(v>=1&&v<=9) G->healer.selfHealKey = 0x30+v; }
             break;
         case MID_FOLLOWER:
             if (td.subId == 2) { v = ShowInputInt(g_hWnd, L"Desired Distance", (int)G->follower.desiredDistance); G->follower.desiredDistance = (float)v; }
@@ -1152,6 +1162,7 @@ void TreeHandleClick(NMTREEVIEWW* ntv) {
         case MID_LOOTER:
             if (td.subId == 1) { v = ShowInputInt(g_hWnd, L"Loot Radius", (int)G->looter.walkRadius); G->looter.walkRadius = (float)v; }
             else if (td.subId == 2) { v = ShowInputInt(g_hWnd, L"Cooldown (ms)", G->looter.cooldownMs); G->looter.cooldownMs = v; }
+            else if (td.subId == 3) { v = ShowInputInt(g_hWnd, L"Max Distance", (int)G->looter.lootMaxDistance); G->looter.lootMaxDistance = (float)v; }
             break;
         }
         RefreshTree();
@@ -1321,6 +1332,12 @@ void CreateConfigPanel(HWND parent) {
     g_hTreeChild[MID_HEALER][g_treeChildCount[MID_HEALER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_HEALER], L"Min HP filter: OFF", idx); }
     { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_HEALER, TREE_VALUE, 5});
     g_hTreeChild[MID_HEALER][g_treeChildCount[MID_HEALER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_HEALER], L"Min HP%: 60", idx); }
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_HEALER, TREE_TOGGLE, 6});
+    g_hTreeChild[MID_HEALER][g_treeChildCount[MID_HEALER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_HEALER], L"Self Heal: OFF", idx); }
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_HEALER, TREE_VALUE, 7});
+    g_hTreeChild[MID_HEALER][g_treeChildCount[MID_HEALER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_HEALER], L"Self HP%: 50", idx); }
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_HEALER, TREE_VALUE, 8});
+    g_hTreeChild[MID_HEALER][g_treeChildCount[MID_HEALER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_HEALER], L"Self key: 1", idx); }
 
     // Follower
     g_hTreeParent[MID_FOLLOWER] = TreeAddItem(g_hTree, TVI_ROOT, MOD_NAMES[MID_FOLLOWER], -1);
@@ -1341,6 +1358,8 @@ void CreateConfigPanel(HWND parent) {
     g_hTreeChild[MID_LOOTER][g_treeChildCount[MID_LOOTER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_LOOTER], L"Radius: 10", idx); }
     { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_LOOTER, TREE_VALUE, 2});
     g_hTreeChild[MID_LOOTER][g_treeChildCount[MID_LOOTER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_LOOTER], L"Cooldown: 1200 ms", idx); }
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_LOOTER, TREE_VALUE, 3});
+    g_hTreeChild[MID_LOOTER][g_treeChildCount[MID_LOOTER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_LOOTER], L"Max distance: 25", idx); }
 
     // Extra
     g_hTreeParent[MID_EXTRA] = TreeAddItem(g_hTree, TVI_ROOT, MOD_NAMES[MID_EXTRA], -1);

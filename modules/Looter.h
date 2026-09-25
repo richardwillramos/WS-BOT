@@ -10,8 +10,8 @@ public:
     bool IsEnabled() const override { return enabled; }
     void SetEnabled(bool e) override { enabled = e; }
 
-    void Start() override { lastLootTick = 0; lootingState = 0; clickAttempts = 0; lastCX = lastCY = 0; }
-    void Stop() override  { lastLootTick = 0; lootingState = 0; clickAttempts = 0; lastCX = lastCY = 0; }
+    void Start() override { lastLootTick = 0; lootingState = 0; clickAttempts = 0; lastCX = lastCY = 0; seenMobs.clear(); vanished.clear(); }
+    void Stop() override  { lastLootTick = 0; lootingState = 0; clickAttempts = 0; lastCX = lastCY = 0; seenMobs.clear(); vanished.clear(); }
 
     void Tick(const GameContext& ctx) override {
         extern void DebugLog(const char* fmt, ...);
@@ -23,31 +23,114 @@ public:
         HWND gw = ctx.gameWindow;
         if (!gw || GetForegroundWindow() != gw || IsIconic(gw)) return;
 
-        // Find corpse to loot: first try tree corpses, then pending corpse from attacker
+        // Find corpse to loot (STANDALONE — não depende do Attacker):
+        // 1) corpses da tree (hp<0)
+        // 2) mobs com hp<=0 (kills de terceiros — ex: você só curando no suporte)
+        // 3) pending corpse do attacker (quando você matou)
+        // Pega o mais próximo dentro de lootMaxDistance.
         std::wstring corpseName;
         float corpseX = 0, corpseY = 0;
         bool hasCorpse = false;
+        float bestDist = 1e9f;
 
-        if (!ctx.corpses.empty()) {
-            auto& c = ctx.corpses[0];
-            corpseName = c.name;
-            corpseX = c.x;
-            corpseY = c.y;
-            hasCorpse = true;
-        } else if (ctx.pendingCorpse && ctx.pendingCorpse->valid) {
-            corpseName = ctx.pendingCorpse->name;
-            corpseX = ctx.pendingCorpse->x;
-            corpseY = ctx.pendingCorpse->y;
-            hasCorpse = true;
-
+        for (auto& c : ctx.corpses) {
+            float dx = c.x - ctx.selfX;
+            float dy = c.y - ctx.selfY;
+            float d = sqrtf(dx*dx + dy*dy);
+            if (d < bestDist) { bestDist = d; corpseName = c.name; corpseX = c.x; corpseY = c.y; hasCorpse = true; }
+        }
+        for (auto& m : ctx.mobs) {
+            if (m.hp > 0) continue;
+            if (m.maxHp <= 0) continue;
+            float dx = m.x - ctx.selfX;
+            float dy = m.y - ctx.selfY;
+            float d = sqrtf(dx*dx + dy*dy);
+            if (d < bestDist) { bestDist = d; corpseName = m.name; corpseX = m.x; corpseY = m.y; hasCorpse = true; }
+        }
+        if (ctx.pendingCorpse && ctx.pendingCorpse->valid) {
             if (now - ctx.pendingCorpse->time > 30000) {
                 ctx.pendingCorpse->valid = false;
-                hasCorpse = false;
                 DebugLog("[LOOT] Pending corpse expired");
+            } else {
+                float dx = ctx.pendingCorpse->x - ctx.selfX;
+                float dy = ctx.pendingCorpse->y - ctx.selfY;
+                float d = sqrtf(dx*dx + dy*dy);
+                if (!hasCorpse || d < bestDist) {
+                    bestDist = d;
+                    corpseName = ctx.pendingCorpse->name;
+                    corpseX = ctx.pendingCorpse->x;
+                    corpseY = ctx.pendingCorpse->y;
+                    hasCorpse = true;
+                }
             }
         }
 
+        // ---- 4) mobs que SUMIRAM da lista (servidor remove morto na hora) ----
+        // Heurística de kill de terceiros: visto em >=2 ticks seguidos,
+        // estava perto (<= lootMaxDistance) e estava danificado (hp < maxHp).
+        // Mob que só passou andando some com HP cheio e é ignorado.
+        for (auto it = seenMobs.begin(); it != seenMobs.end(); ) {
+            bool present = false;
+            for (auto& m : ctx.mobs) if (m.objAddr == it->addr) { present = true; break; }
+            if (present) { ++it; continue; }
+            // Sumiu neste tick
+            if (it->seenCount >= 2 && it->dist <= lootMaxDistance &&
+                it->hp >= 0 && it->maxHp > 0 && it->hp < it->maxHp) {
+                bool dup = false;
+                for (auto& v : vanished) {
+                    float ddx = v.x - it->x, ddy = v.y - it->y;
+                    if (sqrtf(ddx*ddx + ddy*ddy) < 3.0f && now - v.time < 30000) { dup = true; break; }
+                }
+                if (!dup) {
+                    VanishedCorpse v; v.name = it->name; v.x = it->x; v.y = it->y; v.time = now;
+                    vanished.push_back(v);
+                    DebugLog("[LOOT] Mob vanished, possible kill '%S' at (%.1f,%.1f) — will check", it->name.c_str(), it->x, it->y);
+                }
+            }
+            it = seenMobs.erase(it);
+        }
+        // Atualiza vistos com a lista atual
+        for (auto& m : ctx.mobs) {
+            bool known = false;
+            for (auto& s : seenMobs) {
+                if (s.addr == m.objAddr) {
+                    s.x = m.x; s.y = m.y; s.hp = m.hp; s.maxHp = m.maxHp;
+                    s.dist = sqrtf((m.x - ctx.selfX)*(m.x - ctx.selfX) + (m.y - ctx.selfY)*(m.y - ctx.selfY));
+                    s.seenCount++;
+                    known = true;
+                    break;
+                }
+            }
+            if (!known) {
+                SeenMob s; s.addr = m.objAddr; s.name = m.name; s.x = m.x; s.y = m.y;
+                s.hp = m.hp; s.maxHp = m.maxHp;
+                s.dist = sqrtf((m.x - ctx.selfX)*(m.x - ctx.selfX) + (m.y - ctx.selfY)*(m.y - ctx.selfY));
+                s.seenCount = 1;
+                seenMobs.push_back(s);
+            }
+        }
+        // Expira vanished com +30s
+        for (auto it = vanished.begin(); it != vanished.end(); ) {
+            if (now - it->time > 30000) it = vanished.erase(it);
+            else ++it;
+        }
+        for (auto& v : vanished) {
+            float dx = v.x - ctx.selfX;
+            float dy = v.y - ctx.selfY;
+            float d = sqrtf(dx*dx + dy*dy);
+            if (d < bestDist) { bestDist = d; corpseName = v.name; corpseX = v.x; corpseY = v.y; hasCorpse = true; }
+        }
+
         if (!hasCorpse) { lootingState = 0; return; }
+
+        // Ignora corpse longe demais (evita atravessar o mapa)
+        if (bestDist > lootMaxDistance) {
+            if (now - lastFarLogTick > 10000) {
+                lastFarLogTick = now;
+                DebugLog("[LOOT] Nearest corpse '%S' too far (%.1f > %.0f), waiting", corpseName.c_str(), bestDist, lootMaxDistance);
+            }
+            return;
+        }
 
         float dx = corpseX - ctx.selfX;
         float dy = corpseY - ctx.selfY;
@@ -68,6 +151,11 @@ public:
                 lootCount++;
                 DebugLog("[LOOT] Gave up on '%S' after 3 clicks | Total=%d", corpseName.c_str(), lootCount);
                 if (ctx.pendingCorpse) ctx.pendingCorpse->valid = false;
+                for (auto it = vanished.begin(); it != vanished.end(); ) {
+                    float ddx = it->x - corpseX, ddy = it->y - corpseY;
+                    if (sqrtf(ddx*ddx + ddy*ddy) < 3.0f) it = vanished.erase(it);
+                    else ++it;
+                }
                 clickAttempts = 0;
                 lastLootTick = now;
                 return;
@@ -88,6 +176,7 @@ public:
     // Config
     bool  enabled = false;
     float walkRadius = 10.0f;   // walk until within this distance, then click
+    float lootMaxDistance = 25.0f; // ignora corpse além disso (standalone)
     int   cooldownMs = 1200;
     int   lootCount = 0;
 
@@ -97,6 +186,8 @@ public:
         enabled = (buf[0] == L'1');
         GetPrivateProfileStringW(L"Looter", L"WalkRadius", L"10", buf, 256, path);
         walkRadius = (float)_wtof(buf);
+        GetPrivateProfileStringW(L"Looter", L"MaxDistance", L"25", buf, 256, path);
+        lootMaxDistance = (float)_wtof(buf);
         GetPrivateProfileStringW(L"Looter", L"Cooldown", L"1200", buf, 256, path);
         cooldownMs = _wtoi(buf);
     }
@@ -106,6 +197,8 @@ public:
         wchar_t buf[32];
         swprintf_s(buf, L"%.0f", walkRadius);
         WritePrivateProfileStringW(L"Looter", L"WalkRadius", buf, path);
+        swprintf_s(buf, L"%.0f", lootMaxDistance);
+        WritePrivateProfileStringW(L"Looter", L"MaxDistance", buf, path);
         swprintf_s(buf, L"%d", cooldownMs);
         WritePrivateProfileStringW(L"Looter", L"Cooldown", buf, path);
     }
@@ -130,6 +223,12 @@ public:
         hEdtCooldown = CreateWindowExW(0, L"edit", L"1200", WS_CHILD|WS_VISIBLE|WS_BORDER|ES_AUTOHSCROLL|ES_NUMBER,
             x+95, y, 60, 22, parent, (HMENU)9303, GetModuleHandle(NULL), NULL);
 
+        y += 28;
+        CreateWindowExW(0, L"static", L"Max Dist:", WS_CHILD|WS_VISIBLE, x, y+2, 80, 18,
+            parent, NULL, GetModuleHandle(NULL), NULL);
+        hEdtMaxDist = CreateWindowExW(0, L"edit", L"25", WS_CHILD|WS_VISIBLE|WS_BORDER|ES_AUTOHSCROLL|ES_NUMBER,
+            x+85, y, 50, 22, parent, (HMENU)9304, GetModuleHandle(NULL), NULL);
+
         UpdateUI();
     }
 
@@ -137,6 +236,7 @@ public:
         if (hChkEnabled) SendMessage(hChkEnabled, BM_SETCHECK, enabled ? BST_CHECKED : BST_UNCHECKED, 0);
         if (hEdtRadius) { wchar_t b[32]; swprintf_s(b, L"%.0f", walkRadius); SetWindowTextW(hEdtRadius, b); }
         if (hEdtCooldown) { wchar_t b[32]; swprintf_s(b, L"%d", cooldownMs); SetWindowTextW(hEdtCooldown, b); }
+        if (hEdtMaxDist) { wchar_t b[32]; swprintf_s(b, L"%.0f", lootMaxDistance); SetWindowTextW(hEdtMaxDist, b); }
     }
 
     void OnCommand(int id, int code) override {
@@ -148,15 +248,23 @@ public:
         if (id == 9303 && code == EN_CHANGE) {
             wchar_t b[32]; GetWindowTextW(hEdtCooldown, b, 32); cooldownMs = _wtoi(b);
         }
+        if (id == 9304 && code == EN_CHANGE) {
+            wchar_t b[32]; GetWindowTextW(hEdtMaxDist, b, 32); lootMaxDistance = (float)_wtof(b);
+        }
     }
 
 private:
+    struct SeenMob { DWORD addr = 0; std::wstring name; float x = 0, y = 0; int hp = 0, maxHp = 0; float dist = 0; int seenCount = 0; };
+    struct VanishedCorpse { std::wstring name; float x = 0, y = 0; DWORD time = 0; };
     HWND hParent = NULL;
-    HWND hChkEnabled = NULL, hEdtRadius = NULL, hEdtCooldown = NULL;
+    HWND hChkEnabled = NULL, hEdtRadius = NULL, hEdtCooldown = NULL, hEdtMaxDist = NULL;
     DWORD lastLootTick = 0;
+    DWORD lastFarLogTick = 0;
     DWORD lootingState = 0;
     int clickAttempts = 0;
     float lastCX = 0, lastCY = 0;
+    std::vector<SeenMob> seenMobs;
+    std::vector<VanishedCorpse> vanished;
 
     // Convert game coordinates to client-area screen coordinates
     // Warspear 2D top-down: player always centered, scale = pixels per game unit

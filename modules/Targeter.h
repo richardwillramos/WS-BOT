@@ -11,6 +11,7 @@ enum TargetFilterMode {
     FILTER_ALL      = 0,  // Attack any mob (whitelist/blacklist)
     FILTER_BY_NAME  = 1,  // Attack only mobs matching targetMobName
     FILTER_BY_DIST  = 2,  // Attack any mob within maxDistance
+    FILTER_DAMAGED  = 3,  // Assist: only mobs with hp < maxHp (hit by you/party), lowest HP% first
 };
 
 class TargeterModule : public IModule {
@@ -29,9 +30,11 @@ public:
         // Verify current target is still valid (exists in mob list with HP > 0)
         if (selectedAddr > 0x1000) {
             bool stillAlive = false;
+            float curPct = 100.0f;
             for (auto& m : ctx.mobs) {
                 if (m.objAddr == selectedAddr && m.hp > 0) {
                     stillAlive = true;
+                    if (m.maxHp > 0) curPct = (float)m.hp / (float)m.maxHp * 100.0f;
                     break;
                 }
             }
@@ -39,6 +42,35 @@ public:
                 DebugLog("[TARGETER] Target lost (dead or removed), retargeting...");
                 selectedAddr = 0;
                 selectedName.clear();
+            } else if (filterMode == FILTER_DAMAGED && retargetOnNearby) {
+                // Assist rápido: se você bateu em outro mob e ele está BEM mais
+                // danificado que o atual, troca na hora (não espera matar o atual).
+                // Histerese de 10% evita ficar pulando entre dois mobs parecidos,
+                // e atual com <20% é terminado antes de trocar.
+                if (curPct > 20.0f) {
+                    float switchLine = curPct - 10.0f;  // histerese: só troca se bem mais danificado
+                    float bestPct = 101.0f;
+                    float bestD = 9999.0f;
+                    DWORD bestAddr = 0;
+                    std::wstring bestName;
+                    for (auto& m : ctx.mobs) {
+                        if (m.hp <= 0 || m.maxHp <= 0) continue;
+                        if (m.objAddr == selectedAddr) continue;
+                        if (IsParked(m.objAddr, ctx.tickCount)) continue;
+                        if (m.distance > maxDistance) continue;
+                        if (m.hp >= m.maxHp) continue;  // só quem já apanhou
+                        float pct = (float)m.hp / (float)m.maxHp * 100.0f;
+                        if (pct >= switchLine) continue;
+                        if (bestAddr == 0 || pct < bestPct || (pct == bestPct && m.distance < bestD)) {
+                            bestPct = pct; bestD = m.distance; bestAddr = m.objAddr; bestName = m.name;
+                        }
+                    }
+                    if (bestAddr > 0x1000) {
+                        DebugLog("[TARGETER] Switching to more damaged: %S (HP=%.0f%%, was %.0f%%)", bestName.c_str(), bestPct, curPct);
+                        selectedAddr = bestAddr;
+                        selectedName = bestName;
+                    }
+                }
             }
         }
 
@@ -48,6 +80,7 @@ public:
             if (ctx.pendingCorpse && ctx.pendingCorpse->valid) return;
 
             float bestDist = 9999.0f;
+            float bestHpPct = 101.0f;
             for (auto& m : ctx.mobs) {
                 if (m.hp <= 0) continue;
                 if (IsParked(m.objAddr, ctx.tickCount)) continue;   // failed the sword check before
@@ -67,6 +100,14 @@ public:
                     // Already passed maxDistance check above, accept all
                     break;
 
+                case FILTER_DAMAGED: {
+                    // Assist: só mob que já apanhou (hp < maxHp).
+                    // Ex: você bate no mob com o Magutop e o bot foca ele.
+                    if (m.maxHp <= 0) continue;
+                    if (m.hp >= m.maxHp) continue;
+                    break;
+                }
+
                 case FILTER_ALL:
                 default:
                     // Apply whitelist/blacklist
@@ -85,10 +126,18 @@ public:
                     break;
                 }
 
-                // For distance mode: pick closest mob
-                // For name mode: pick closest matching mob
+                // For distance/name mode: pick closest matching mob
+                // For damaged mode: pick lowest HP% (focus what you/party already hit)
                 // For all mode: pick first match (original behavior)
-                if (filterMode == FILTER_BY_DIST || filterMode == FILTER_BY_NAME) {
+                if (filterMode == FILTER_DAMAGED) {
+                    float pct = m.maxHp > 0 ? (float)m.hp / (float)m.maxHp * 100.0f : 100.0f;
+                    if (pct < bestHpPct || (pct == bestHpPct && m.distance < bestDist)) {
+                        bestHpPct = pct;
+                        bestDist = m.distance;
+                        selectedAddr = m.objAddr;
+                        selectedName = m.name;
+                    }
+                } else if (filterMode == FILTER_BY_DIST || filterMode == FILTER_BY_NAME) {
                     if (m.distance < bestDist) {
                         bestDist = m.distance;
                         selectedAddr = m.objAddr;
@@ -101,8 +150,11 @@ public:
                 }
             }
             if (selectedAddr > 0x1000) {
-                DebugLog("[TARGETER] Selected: %S (addr=0x%08X dist=%.1f)", selectedName.c_str(), selectedAddr,
-                    filterMode == FILTER_BY_DIST || filterMode == FILTER_BY_NAME ? bestDist : 0.0f);
+                if (filterMode == FILTER_DAMAGED)
+                    DebugLog("[TARGETER] Selected: %S (addr=0x%08X HP=%.0f%% dist=%.1f)", selectedName.c_str(), selectedAddr, bestHpPct, bestDist);
+                else
+                    DebugLog("[TARGETER] Selected: %S (addr=0x%08X dist=%.1f)", selectedName.c_str(), selectedAddr,
+                        filterMode == FILTER_BY_DIST || filterMode == FILTER_BY_NAME ? bestDist : 0.0f);
             }
         }
     }
@@ -188,6 +240,7 @@ public:
         SendMessageW(hCboFilter, CB_ADDSTRING, 0, (LPARAM)L"All (whitelist/blacklist)");
         SendMessageW(hCboFilter, CB_ADDSTRING, 0, (LPARAM)L"By Name");
         SendMessageW(hCboFilter, CB_ADDSTRING, 0, (LPARAM)L"By Distance");
+        SendMessageW(hCboFilter, CB_ADDSTRING, 0, (LPARAM)L"Damaged (assist)");
         SendMessageW(hCboFilter, CB_SETCURSEL, filterMode, 0);
         y += 28;
 

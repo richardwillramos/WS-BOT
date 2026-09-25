@@ -61,6 +61,8 @@ public:
                 // Clear target so Targeter can select next mob
                 targetAddr = 0;
                 attackState = 0;
+                attackCount = 0;
+                noSwordTries = 0;
             }
             return;
         }

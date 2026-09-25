@@ -126,6 +126,7 @@ static BotState* G = nullptr;
 static HINSTANCE g_hInst = NULL;
 static HWND g_hWnd = NULL;
 static HWND g_hStatus = NULL;
+static HICON g_hAppIconSmall = NULL;  // icone do app (warspear.ico) p/ titulo - restaurado quando nao ha classe
 static HFONT g_hFont = NULL;
 static HFONT g_hTreeFont = NULL;
 
@@ -1539,6 +1540,53 @@ void CreateConnPanel(HWND parent) {
 // ============================================================
 // UI: Update UI (called on timer)
 // ============================================================
+// ============================================================
+// Icone da classe: barra de titulo (WM_SETICON SMALL) + status bar (SB_SETICON)
+// Muda so quando o classId muda; arquivos em config\class-icons\NN_*.ico
+// ============================================================
+static HICON g_hClassIcon = NULL;
+static int   g_classIconId = -1;
+
+static const wchar_t* kClassIconFile(int classId) {
+    static const wchar_t* files[] = {
+        L"", L"01_paladino.ico", L"02_sacerdote.ico", L"03_mago.ico", L"04_barbaro.ico",
+        L"05_ladino.ico", L"06_xama.ico", L"07_dancarino_da_lamina.ico", L"08_patrulheiro.ico",
+        L"09_druida.ico", L"10_cavaleiro_da_morte.ico", L"11_necromante.ico", L"12_bruxo.ico",
+        L"13_explorador.ico", L"14_cacador.ico", L"15_guarda.ico", L"16_encantador.ico",
+        L"17_templario.ico", L"18_cacique.ico", L"19_invocador_de_feras.ico", L"20_ceifeiro.ico"
+    };
+    if (classId < 1 || classId > 20) return L"";
+    return files[classId];
+}
+
+static void SetClassIcon(int classId) {
+    if (classId == g_classIconId) return;
+    g_classIconId = classId;
+
+    if (g_hClassIcon) {
+        if (g_hStatus) SendMessageW(g_hStatus, SB_SETICON, 0, 0);
+        DestroyIcon(g_hClassIcon);
+        g_hClassIcon = NULL;
+    }
+
+    HICON hTitleIco = g_hAppIconSmall;  // titulo volta pro icone do app
+    const wchar_t* f = kClassIconFile(classId);
+    if (f[0]) {
+        wchar_t path[MAX_PATH];
+        GetModuleFileNameW(NULL, path, MAX_PATH);
+        wchar_t* bs = wcsrchr(path, L'\\'); if (bs) *bs = 0;
+        wcscat_s(path, L"\\config\\class-icons\\");
+        wcscat_s(path, f);
+        g_hClassIcon = (HICON)LoadImageW(NULL, path, IMAGE_ICON, 16, 16, LR_LOADFROMFILE);
+        if (g_hClassIcon) {
+            hTitleIco = g_hClassIcon;
+            if (g_hStatus) SendMessageW(g_hStatus, SB_SETICON, 0, (LPARAM)g_hClassIcon);
+        }
+    }
+    if (g_hWnd && hTitleIco)
+        SendMessageW(g_hWnd, WM_SETICON, ICON_SMALL, (LPARAM)hTitleIco);
+}
+
 // Mostra os stats no status bar; se nao couber na parte 0, rola em carrossel
 // (da direita para a esquerda) com looping suave via padding de espacos.
 static void SetStatusStats(const wchar_t* text) {
@@ -1555,7 +1603,8 @@ static void SetStatusStats(const wchar_t* text) {
     ReleaseDC(g_hStatus, hdc);
 
     // Cabe na parte 0? → texto estatico (sem necessidade de scroll)
-    if (g_statusPart0W <= 0 || contentW <= g_statusPart0W - 16) {
+    int avail = g_statusPart0W - (g_hClassIcon ? 18 : 0);  // SB_SETICON reserva espaco
+    if (avail <= 0 || contentW <= avail - 16) {
         SetWindowTextW(g_hStatus, text);
         return;
     }
@@ -1573,6 +1622,7 @@ static void SetStatusStats(const wchar_t* text) {
 
 void UpdateUI() {
     if (!g_connected || !g_hProcess) {
+        SetClassIcon(0);
         SetWindowTextW(g_hStatus, g_hProcess ? L"Connected" : L"Select Warspear and connect");
         return;
     }
@@ -1581,6 +1631,7 @@ void UpdateUI() {
     std::vector<CorpseData> corpses;
     DWORD playerAddr=0, gmAddr=0;
     if (!ReadGameState(sx,sy,hp,mhp,mn,mmn,name,level,classId,pl,mb,np,corpses,&playerAddr,&gmAddr)) {
+        SetClassIcon(0);
         SetWindowTextW(g_hStatus, L"Cannot read game memory");
         g_connected = false;
         return;
@@ -1595,6 +1646,7 @@ void UpdateUI() {
         name.c_str(), level, GetClassName(classId), hp, mhp, mn, mmn, sx, sy,
         (int)pl.size(), (int)mb.size(), (int)np.size(), (int)corpses.size());
     SetStatusStats(buf);
+    SetClassIcon(classId);
 
     static std::wstring lastCharName;
     if (name != lastCharName) {
@@ -1764,6 +1816,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (hIco) {
                 SendMessageW(hWnd, WM_SETICON, ICON_BIG, (LPARAM)hIco);
                 SendMessageW(hWnd, WM_SETICON, ICON_SMALL, (LPARAM)hIco);
+                g_hAppIconSmall = hIco;
             }
         }
 

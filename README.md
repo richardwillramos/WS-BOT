@@ -263,8 +263,10 @@ WS-BOT/
 │   └── boss_names.json         ← Nomes dos bosses (opcional; vazio = sem checagem de boss)
 │
 ├── controller/                 ← main.cpp + config/ (o exe carrega config do próprio diretório)
+│   └── warspear.rc             ← Recurso do ícone (1 ICON "warspear.ico")
 │
-├── build-controller-local.bat  ← Script de compilação do controller
+├── warspear.ico                ← Ícone do programa (gerado de icons8-mmorpg-64.png)
+├── build-controller-local.bat  ← Script de compilação do controller (rc + cl)
 └── README.md
 ```
 
@@ -287,6 +289,15 @@ build-controller-local.bat
 > Existem dois binários (`warspear-controller.exe` na raiz e
 > `controller\warspear-controller.exe`) — **mesmo fonte**; reconstrua os dois
 > após qualquer alteração para não usar um exe desatualizado.
+
+> **Ícone:** o build manual precisa de dois passos — o `cl` sozinho não chama
+> o compilador de recursos:
+> ```bat
+> rc /nologo controller\warspear.rc
+> cl /nologo /O2 /EHsc /MTd /GS- controller\main.cpp controller\warspear.res /Fe:warspear-controller.exe /link user32.lib gdi32.lib kernel32.lib comctl32.lib comdlg32.lib psapi.lib /SUBSYSTEM:WINDOWS
+> ```
+> Sem o `.res` o exe compila normal, só perde o ícone embutido (o fallback
+> carrega `warspear.ico` ao lado do exe na hora de abrir).
 
 ### Flags de Compilação Atuais
 
@@ -341,15 +352,26 @@ O bot suporta múltiplas instâncias do Warspear Online. Cada controller conecta
 
 ### UI (TreeView)
 
-A UI principal usa um TreeView (árvore hierárquica) com 6 módulos:
+A UI principal usa um TreeView (árvore hierárquica) com 7 módulos:
 - **Targeter**: Enabled, Filter Mode (All/ByName/ByDistance/Damaged), Mob Name, Max Distance, Retarget, Whitelist, Blacklist
 - **Attacker**: Status, Cooldown, Skills
 - **Healer**: Status, Target (seletor de player), Cooldown, Heal key, **Heal Mode** (Every cooldown / HP% below), Min HP%, Self Heal, Self HP%, Self Key
 - **Follower**: Status, Target (seletor de player), Distance, Max distance
 - **Looter**: Status, Radius, Cooldown, Max Distance
-- **Extra**: Anti AFK, Auto Revive, Auto Sell, Auto Repair
+- **Dungeon**: Status, Phase, Portal/Chest/Exit names, Walk radius, Max distance, Loot in waves, Loot tries
+- **Extra**: Anti AFK, Auto Revive, Auto Sell, Auto Repair, Auto Buff
 
 Cada módulo é um nó pai que expande/recolhe com "+". Cliques nos filhos alternam valores ou abrem input dialogs.
+
+**Visual (NM_CUSTOMDRAW, sem custo de performance — pinta só na hora do desenho):**
+- Valores booleanos `: true`/`: ON` em **verde**, `: false`/`: OFF` em **vermelho**
+- Nome do módulo (nó pai): **verde** quando ligado, **cinza** quando desligado
+- Tree com double-buffer (menos tremor no repaint)
+
+**Barra de status:** parte esquerda mostra `Nome | Lv | Classe | HP | MP | Pos | P/M/N |
+Corpos`; se não couber, rola em **carrossel** (1 char a cada 70 ms); se couber, fica fixa.
+Ícone do programa (`warspear.ico`, embutido como recurso) aparece na barra de
+tarefas, título e Explorer.
 
 ### Targeter - Filtros
 

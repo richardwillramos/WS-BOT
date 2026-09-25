@@ -1124,6 +1124,11 @@ void RefreshTree() {
     TreeSetItemText(MID_EXTRA, 1, G->extra.autoRevive ? L"Auto Revive: ON" : L"Auto Revive: OFF");
     TreeSetItemText(MID_EXTRA, 2, G->extra.autoSell ? L"Auto Sell: ON" : L"Auto Sell: OFF");
     TreeSetItemText(MID_EXTRA, 3, G->extra.autoRepair ? L"Auto Repair: ON" : L"Auto Repair: OFF");
+    TreeSetItemText(MID_EXTRA, 4, G->extra.buffEnabled ? L"Auto Buff: ON" : L"Auto Buff: OFF");
+    swprintf(b,256,L"Buff key: %c", G->extra.buffKey);
+    TreeSetItemText(MID_EXTRA, 5, b);
+    swprintf(b,256,L"Buff cooldown: %d ms", G->extra.buffCooldownMs);
+    TreeSetItemText(MID_EXTRA, 6, b);
 
     TreeSetItemText(MID_DUNGEON, 0, G->dungeon.enabled ? L"Status: true" : L"Status: false");
     swprintf(b,256,L"Phase: %s", G->dungeon.PhaseName());
@@ -1179,6 +1184,7 @@ void TreeHandleClick(NMTREEVIEWW* ntv) {
             else if (td.subId == 1) G->extra.autoRevive = !G->extra.autoRevive;
             else if (td.subId == 2) G->extra.autoSell = !G->extra.autoSell;
             else if (td.subId == 3) G->extra.autoRepair = !G->extra.autoRepair;
+            else if (td.subId == 4) G->extra.buffEnabled = !G->extra.buffEnabled;
             break;
         case MID_DUNGEON:
             if (td.subId == 0) G->dungeon.enabled = !G->dungeon.enabled;
@@ -1232,6 +1238,10 @@ void TreeHandleClick(NMTREEVIEWW* ntv) {
             if (td.subId == 1) { v = ShowInputInt(g_hWnd, L"Loot Radius", (int)G->looter.walkRadius); G->looter.walkRadius = (float)v; }
             else if (td.subId == 2) { v = ShowInputInt(g_hWnd, L"Cooldown (ms)", G->looter.cooldownMs); G->looter.cooldownMs = v; }
             else if (td.subId == 3) { v = ShowInputInt(g_hWnd, L"Max Distance", (int)G->looter.lootMaxDistance); G->looter.lootMaxDistance = (float)v; }
+            break;
+        case MID_EXTRA:
+            if (td.subId == 5) { v = ShowInputInt(g_hWnd, L"Buff key (1-9)", G->extra.buffKey - 0x30); if (v >= 1 && v <= 9) G->extra.buffKey = 0x30 + v; }
+            else if (td.subId == 6) { v = ShowInputInt(g_hWnd, L"Buff cooldown (ms)", G->extra.buffCooldownMs); if (v > 0) G->extra.buffCooldownMs = v; }
             break;
         case MID_DUNGEON: {
             wchar_t buf[128] = {};
@@ -1448,6 +1458,12 @@ void CreateConfigPanel(HWND parent) {
     g_hTreeChild[MID_EXTRA][g_treeChildCount[MID_EXTRA]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_EXTRA], L"Auto Sell: OFF", idx); }
     { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_EXTRA, TREE_TOGGLE, 3});
     g_hTreeChild[MID_EXTRA][g_treeChildCount[MID_EXTRA]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_EXTRA], L"Auto Repair: OFF", idx); }
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_EXTRA, TREE_TOGGLE, 4});
+    g_hTreeChild[MID_EXTRA][g_treeChildCount[MID_EXTRA]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_EXTRA], L"Auto Buff: OFF", idx); }
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_EXTRA, TREE_VALUE, 5});
+    g_hTreeChild[MID_EXTRA][g_treeChildCount[MID_EXTRA]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_EXTRA], L"Buff key: 5", idx); }
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_EXTRA, TREE_VALUE, 6});
+    g_hTreeChild[MID_EXTRA][g_treeChildCount[MID_EXTRA]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_EXTRA], L"Buff cooldown: 10000 ms", idx); }
 
     // Dungeon
     g_hTreeParent[MID_DUNGEON] = TreeAddItem(g_hTree, TVI_ROOT, MOD_NAMES[MID_DUNGEON], -1);

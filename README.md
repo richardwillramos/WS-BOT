@@ -359,7 +359,7 @@ A UI principal usa um TreeView (árvore hierárquica) com 7 módulos:
 - **Follower**: Status, Target (seletor de player), Distance, Max distance
 - **Looter**: Status, Radius, Cooldown, Max Distance
 - **Dungeon**: Status, Phase, Portal/Chest/Exit names, Walk radius, Max distance, Loot in waves, Loot tries
-- **Extra**: Anti AFK, Auto Revive, Auto Sell, Auto Repair, Auto Buff
+- **Extra**: Anti AFK, Auto Revive, Auto Sell, Auto Repair, **Auto Buff**, Buff key, Buff cooldown
 
 Cada módulo é um nó pai que expande/recolhe com "+". Cliques nos filhos alternam valores ou abrem input dialogs.
 

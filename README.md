@@ -1,4 +1,4 @@
-# Warspear Online Bot v5.4
+# Warspear Online Bot v5.5
 
 Bot de automação para Warspear Online (cliente 32-bit, private server). Funciona via memória do processo do jogo (ReadProcessMemory/WriteProcessMemory) com arquitetura modular.
 

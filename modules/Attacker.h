@@ -206,7 +206,8 @@ public:
     int   globalCooldownMs = 1500;
     std::vector<SkillEntry> skills;
 
-    // UI dialog: "1, 3" -> skills list (key only; cooldown falls back to GlobalCooldown)
+    // UI dialog: "1, 2, 3, 4" -> skills list (any count, order = priority;
+    // cooldown falls back to per-skill default 1500 ms)
     void SetSkillKeys(const wchar_t* csv) {
         skills.clear();
         if (!csv) return;

@@ -448,18 +448,23 @@ WAVE1 (matar) → PORTAL1 (andar + Enter no portal) → WAVE2 (matar, boss por �
 
 ### Attacker - Skills
 
-- Clique em **Skills** na tree → diálogo `1, 3` (teclas separadas por vírgula)
+- Clique em **Skills** na tree → diálogo com teclas separadas por vírgula
+  (`1, 2, 3, 4, 5` — **quantas você quiser**; a ordem digita a prioridade;
+  o INI guarda até `Skill6`)
 - No ciclo de ataque, quando a espada (flag 8) aparece, se alguma skill está
-  fora de cooldown ela dispara **key + Enter** antes do golpe normal
+  fora de cooldown ela dispara **key + Enter** antes do golpe normal (só uma
+  por golpe — a de maior prioridade que estiver pronta)
 - Cooldown por skill: `SkillNCooldown` no INI (padrão 1500 ms); ordem por
-  `SkillNPriority` (menor primeiro)
+  `SkillNPriority` (menor primeiro). **Atenção:** salvar pelo diálogo regrava
+  a lista inteira com cooldown padrão (1500 ms) — cooldowns diferentes se
+  configuram no INI
 - INI equivalente: `Skill1Name/Key/Cooldown/Priority/Enabled` ... `Skill6` —
   os exemplos já vêm em `config\Attacker.ini` (teclas 1 e 3)
 
 ### Extra - Auto Buff
 
-- Painel do Extra: **Auto Buff** + `Buff key` (padrão `5`) + `Buff cooldown`
-  (padrão 10000 ms)
+- Árvore do Extra: **Auto Buff** + `Buff key` (padrão `5`, 1-9) +
+  `Buff cooldown` (padrão 10000 ms)
 - No tick: cursor no **próprio char** + tecla + Enter (mesmo padrão do
   self-heal do Healer); pula durante `dungeonBusy` para não bagunçar diálogo
 - INI: `BuffEnabled`, `BuffKey`, `BuffCooldown` em `config\Extra.ini`

@@ -64,6 +64,11 @@ namespace Game {
     constexpr DWORD CUR_RAW_X      = 0x10;
     constexpr DWORD CUR_RAW_Y      = 0x14;
     constexpr DWORD CUR_FLAG       = 0x7C;
+    // Mapa de stats (BST) do GM: head em [gm+0x24C], root em [head];
+    // no: {parent, left, right, balance, key, value} (value em TN_OBJ).
+    constexpr DWORD STATS_MAP      = 0x24C;
+    constexpr DWORD TN_KEY         = 0x10;
+    constexpr int   STAT_GOLD      = 0;   // chave do gold no mapa de stats
 }
 
 // ============================================================
@@ -872,6 +877,15 @@ int ShowInputInt(HWND parent, const wchar_t* title, int current) {
     MSG msg{};
     while (GetMessageW(&msg, NULL, 0, 0)) {
         if (!IsWindow(hDlg)) break;
+        // Janela falsa (nao e dialog real): Enter/ESC nao chegam no botao sozinhos
+        if (msg.message == WM_KEYDOWN && msg.wParam == VK_RETURN) {
+            SendMessageW(hDlg, WM_COMMAND, MAKEWPARAM(1002, BN_CLICKED), 0);
+            continue;
+        }
+        if (msg.message == WM_KEYDOWN && msg.wParam == VK_ESCAPE) {
+            SendMessageW(hDlg, WM_COMMAND, MAKEWPARAM(1003, BN_CLICKED), 0);
+            continue;
+        }
         if (!IsDialogMessageW(hDlg, &msg)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
     }
     return g_inputResult;
@@ -879,6 +893,7 @@ int ShowInputInt(HWND parent, const wchar_t* title, int current) {
 
 // String input dialog
 static wchar_t g_inputStrBuf[256] = {};
+static bool g_inputStrOk = false;
 static HWND g_inputStrParent = NULL;
 static LRESULT CALLBACK InputStrDlgProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     switch (m) {
@@ -897,6 +912,7 @@ static LRESULT CALLBACK InputStrDlgProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     }
     case WM_COMMAND:
         if (LOWORD(w) == 1002) {
+            g_inputStrOk = true;
             GetWindowTextW(GetDlgItem(h, 1001), g_inputStrBuf, 256);
             DestroyWindow(h);
         }
@@ -908,8 +924,9 @@ static LRESULT CALLBACK InputStrDlgProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     return DefWindowProcW(h, m, w, l);
 }
 
-void ShowInputString(HWND parent, const wchar_t* title, const wchar_t* current, wchar_t* out, int maxLen) {
+bool ShowInputString(HWND parent, const wchar_t* title, const wchar_t* current, wchar_t* out, int maxLen) {
     wcscpy_s(g_inputStrBuf, current ? current : L"");
+    g_inputStrOk = false;
     g_inputStrParent = parent;
 
     WNDCLASSEXW wc{}; wc.cbSize = sizeof(wc);
@@ -929,9 +946,20 @@ void ShowInputString(HWND parent, const wchar_t* title, const wchar_t* current, 
     MSG msg{};
     while (GetMessageW(&msg, NULL, 0, 0)) {
         if (!IsWindow(hDlg)) break;
+        // Janela falsa (nao e dialog real): Enter/ESC nao chegam no botao sozinhos
+        if (msg.message == WM_KEYDOWN && msg.wParam == VK_RETURN) {
+            SendMessageW(hDlg, WM_COMMAND, MAKEWPARAM(1002, BN_CLICKED), 0);
+            continue;
+        }
+        if (msg.message == WM_KEYDOWN && msg.wParam == VK_ESCAPE) {
+            DestroyWindow(hDlg);
+            continue;
+        }
         if (!IsDialogMessageW(hDlg, &msg)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
     }
-    wcscpy_s(out, maxLen, g_inputStrBuf);
+    // Cancel (X/ESC): devolve o valor atual intacto - nao aplica o que estava pre-preenchido
+    wcscpy_s(out, maxLen, g_inputStrOk ? g_inputStrBuf : (current ? current : L""));
+    return g_inputStrOk;
 }
 
 // ============================================================
@@ -1209,7 +1237,7 @@ void TreeHandleClick(NMTREEVIEWW* ntv) {
         case MID_ATTACKER:
             if (td.subId == 1) { v = ShowInputInt(g_hWnd, L"Cooldown (ms)", G->attacker.globalCooldownMs); G->attacker.globalCooldownMs = v; }
             else if (td.subId == 2) {
-                // Skill keys separated by comma (ex: 1, 3)
+                // Skill keys separated by comma (ex: 1, 2, 3, 4) - any count
                 wchar_t cur[128] = {}, buf[128] = {};
                 bool first = true;
                 for (auto& s : G->attacker.skills) {
@@ -1219,8 +1247,11 @@ void TreeHandleClick(NMTREEVIEWW* ntv) {
                     wcscat_s(cur, k);
                     first = false;
                 }
-                ShowInputString(g_hWnd, L"Skill keys (ex: 1, 3)", cur, buf, 128);
-                G->attacker.SetSkillKeys(buf);
+                if (ShowInputString(g_hWnd, L"Skill keys (ex: 1, 2, 3, 4, 5)", cur, buf, 128)) {
+                    G->attacker.SetSkillKeys(buf);
+                    DebugLog("[ATTACK] Skills set: %d key(s) - input: %S",
+                        (int)G->attacker.skills.size(), buf);
+                }
             }
             break;
         case MID_HEALER:
@@ -1636,6 +1667,21 @@ static void SetStatusStats(const wchar_t* text) {
     SendMessageW(g_hStatus, SB_SETTEXTW, 0, (LPARAM)disp.c_str());
 }
 
+// Gold:BST de stats enraizado via GM+0x24C (head) -> [head] = root;
+// busca pelo key 0 e le o value (nó {parent,left,right,balance,key,value}).
+static int ReadGold(DWORD gm) {
+    if (gm <= 0x1000) return 0;
+    DWORD head = Read<DWORD>(gm + Game::STATS_MAP);
+    if (head <= 0x1000) return 0;
+    DWORD node = Read<DWORD>(head);
+    for (int i = 0; node > 0x1000 && i < 64; i++) {
+        int key = (int)Read<DWORD>(node + Game::TN_KEY);
+        if (key == Game::STAT_GOLD) return (int)Read<DWORD>(node + Game::TN_OBJ);
+        node = Read<DWORD>(node + ((Game::STAT_GOLD < key) ? Game::TN_LEFT : Game::TN_RIGHT));
+    }
+    return 0;
+}
+
 void UpdateUI() {
     if (!g_connected || !g_hProcess) {
         SetClassIcon(0);
@@ -1664,12 +1710,15 @@ void UpdateUI() {
     SetStatusStats(buf);
     SetClassIcon(classId);
 
-    static std::wstring lastCharName;
-    if (name != lastCharName) {
-        wchar_t wtitle[128];
-        swprintf(wtitle, 128, L"%s [Lv.%d %s]", name.c_str(), level, GetClassName(classId));
+    // Titulo da janela (barra de cima): gold a direita do nome da classe.
+    // Atualiza tambem quando o gold muda (loot), nao so no nome.
+    static std::wstring lastTitle;
+    wchar_t wtitle[160];
+    swprintf(wtitle, 160, L"%s [Lv.%d %s] | Gold: %d", name.c_str(), level,
+        GetClassName(classId), ReadGold(gmAddr));
+    if (lastTitle != wtitle) {
         SetWindowTextW(g_hWnd, wtitle);
-        lastCharName = name;
+        lastTitle = wtitle;
     }
 
     GameContext ctx = BuildContext();

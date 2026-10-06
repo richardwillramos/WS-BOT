@@ -1,5 +1,6 @@
 #pragma once
 #include "../include/IModule.h"
+#include "../include/postkey.h"
 #include <string>
 #include <vector>
 #include <cmath>
@@ -81,7 +82,7 @@ public:
         }
 
         HWND gw = ctx.gameWindow;
-        if (!gw || GetForegroundWindow() != gw || IsIconic(gw)) return;
+        if (!gw || IsIconic(gw)) return;
 
         // Get cursor pointer
         DWORD curPtr = GetCursorPtr(ctx.hProcess);
@@ -337,30 +338,14 @@ private:
         WriteProcessMemory(hProc, (LPVOID)(curPtr + CUR_RAW_Y_OFFSET), &rawY, 4, NULL);
     }
 
-    // Send Enter locally with foreground focus (same as follower/backup)
+    // Enter via PostMessage (sem foreground; 80ms de segurado = golpe garantido)
     static void SendAttackEnter(HWND gw) {
-        if (!gw) return;
-        DWORD fgTid = GetWindowThreadProcessId(gw, NULL);
-        DWORD myTid = GetCurrentThreadId();
-        AttachThreadInput(myTid, fgTid, TRUE);
-        SetForegroundWindow(gw);
-        AttachThreadInput(myTid, fgTid, FALSE);
-        keybd_event(VK_RETURN, 0, 0, 0);
-        Sleep(80);   // 30ms was too short in tests; 80ms proven to land hits
-        keybd_event(VK_RETURN, 0, KEYEVENTF_KEYUP, 0);
+        PostGameEnter(gw, 80);
     }
 
-    // Press a skill key with foreground focus (then caller sends Enter)
+    // Skill key via PostMessage (depois o caller envia Enter)
     static void SendSkillKey(HWND gw, int vk) {
-        if (!gw) return;
-        DWORD fgTid = GetWindowThreadProcessId(gw, NULL);
-        DWORD myTid = GetCurrentThreadId();
-        AttachThreadInput(myTid, fgTid, TRUE);
-        SetForegroundWindow(gw);
-        AttachThreadInput(myTid, fgTid, FALSE);
-        keybd_event((BYTE)vk, 0, 0, 0);
-        Sleep(50);
-        keybd_event((BYTE)vk, 0, KEYEVENTF_KEYUP, 0);
+        PostGameKey(gw, (UINT)vk, 50);
         Sleep(30);
     }
 };

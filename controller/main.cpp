@@ -19,6 +19,7 @@
 #pragma comment(lib, "comdlg32.lib")
 
 #include "../include/IModule.h"
+#include "../include/postkey.h"
 #include "../include/ModuleManager.h"
 #include "../modules/Targeter.h"
 #include "../modules/Attacker.h"
@@ -511,9 +512,7 @@ bool MoveToTile(float gameX, float gameY) {
     if (tileY > 27) tileY = 27;
     if (!WriteCursorPos(tileX, tileY)) return false;
     Sleep(30);
-    keybd_event(VK_RETURN, 0, 0, 0);
-    Sleep(30);
-    keybd_event(VK_RETURN, 0, KEYEVENTF_KEYUP, 0);
+    PostGameEnter(FindGameWindow(), 60);
     return true;
 }
 
@@ -703,51 +702,12 @@ void RefreshProcesses(HWND hList) {
 }
 
 // ============================================================
-// Remote keybd_event via CreateRemoteThread
-// Generates real OS-level input inside the target process,
-// which DirectInput/raw input games actually process.
+// Enter via PostMessage (substitui o antigo keybd_event remoto:
+// PostMessage WM_KEYDOWN/UP e processado pelo jogo mesmo com a
+// janela em segundo plano — comprovado ao vivo em 06/10/2026)
 // ============================================================
-static FARPROC g_keybdEventAddr = nullptr;
-
 void RemoteSendEnter() {
-    if (!g_hProcess || !g_keybdEventAddr) return;
-
-    // Resolve keybd_event address (same across processes due to shared user-mode pages)
-    if (!g_keybdEventAddr) {
-        HMODULE hUser32 = GetModuleHandleW(L"user32.dll");
-        if (hUser32) g_keybdEventAddr = GetProcAddress(hUser32, "keybd_event");
-    }
-    if (!g_keybdEventAddr) return;
-
-    // Shellcode:
-    //   mov esi, <keybd_event>
-    //   push 0; push 0; push 0; push 0x0D; call esi   (keybd_event down)
-    //   push 0; push 2; push 0; push 0x0D; call esi   (keybd_event up)
-    //   ret 4
-    BYTE sc[40];
-    int i = 0;
-    sc[i++] = 0xBE;                                    // mov esi, imm32
-    *(DWORD*)(sc + i) = (DWORD)g_keybdEventAddr; i += 4;
-    // keybd_event(VK_RETURN, 0, 0, 0)
-    sc[i++] = 0x6A; sc[i++] = 0x00;                    // push 0 (dwExtraInfo)
-    sc[i++] = 0x6A; sc[i++] = 0x00;                    // push 0 (dwFlags)
-    sc[i++] = 0x6A; sc[i++] = 0x00;                    // push 0 (bScan)
-    sc[i++] = 0x6A; sc[i++] = 0x0D;                    // push 0x0D (VK_RETURN)
-    sc[i++] = 0xFF; sc[i++] = 0xD6;                    // call esi
-    // keybd_event(VK_RETURN, 0, KEYEVENTF_KEYUP, 0)
-    sc[i++] = 0x6A; sc[i++] = 0x00;                    // push 0
-    sc[i++] = 0x6A; sc[i++] = 0x02;                    // push 2 (KEYEVENTF_KEYUP)
-    sc[i++] = 0x6A; sc[i++] = 0x00;                    // push 0
-    sc[i++] = 0x6A; sc[i++] = 0x0D;                    // push 0x0D
-    sc[i++] = 0xFF; sc[i++] = 0xD6;                    // call esi
-    sc[i++] = 0xC2; sc[i++] = 0x04; sc[i++] = 0x00;   // ret 4
-
-    LPVOID remote = VirtualAllocEx(g_hProcess, NULL, i, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-    if (!remote) return;
-    WriteProcessMemory(g_hProcess, remote, sc, i, NULL);
-    HANDLE ht = CreateRemoteThread(g_hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)remote, NULL, 0, NULL);
-    if (ht) { WaitForSingleObject(ht, 1000); CloseHandle(ht); }
-    VirtualFreeEx(g_hProcess, remote, 0, MEM_RELEASE);
+    PostGameEnter(FindGameWindow(), 80);
 }
 
 // ============================================================

@@ -1,5 +1,6 @@
 #pragma once
 #include "../include/IModule.h"
+#include "../include/postkey.h"
 #include <string>
 #include <vector>
 #include <cmath>
@@ -21,7 +22,7 @@ public:
         if (now - lastLootTick < (DWORD)cooldownMs) return;
 
         HWND gw = ctx.gameWindow;
-        if (!gw || GetForegroundWindow() != gw || IsIconic(gw)) return;
+        if (!gw || IsIconic(gw)) return;
 
         // PAUSA por prioridade: cura > loot > ataque; dungeon manda no loot
         // (dungeonNoLoot = waves sem drop; dungeonBusy = interagindo com portal/bau)
@@ -145,9 +146,8 @@ public:
             DebugLog("[LOOT] Walking toward '%S' dist=%.1f", corpseName.c_str(), dist);
             WalkToPosition(ctx, gw, corpseX, corpseY);
         } else {
-            // Close enough — click the corpse. One blind click often misses
-            // (corpse shifted, scale off), so retry up to 3 clicks while the
-            // corpse is valid instead of invalidating after the first one.
+            // Perto o bastante — cursor no tile do corpse (WPM) + Enter postado.
+            // 1 clique cego costumava errar (corpse anda), entao tenta 3x.
             if (corpseX != lastCX || corpseY != lastCY) { clickAttempts = 0; lastCX = corpseX; lastCY = corpseY; }
             if (clickAttempts >= 3) {
                 // Already tried 3 times — give up on this corpse so we never
@@ -164,16 +164,13 @@ public:
                 lastLootTick = now;
                 return;
             }
-            int cx, cy;
-            if (GameToClient(ctx, corpseX, corpseY, cx, cy)) {
-                DebugLog("[LOOT] Click corpse '%S' (%d/3) -> client(%d,%d) dist=%.1f", corpseName.c_str(), clickAttempts + 1, cx, cy, dist);
-                ClickAtClient(gw, cx, cy);
-                Sleep(400);
-                SendLocalEnter(gw);
-                Sleep(300);
-                clickAttempts++;
-                lastLootTick = now;
-            }
+            DebugLog("[LOOT] Cursor on corpse '%S' (%d/3) dist=%.1f", corpseName.c_str(), clickAttempts + 1, dist);
+            WriteCursorOnWorld(ctx.hProcess, corpseX, corpseY);
+            Sleep(250);
+            SendLocalEnter(gw);
+            Sleep(300);
+            clickAttempts++;
+            lastLootTick = now;
         }
     }
 
@@ -270,56 +267,20 @@ private:
     std::vector<SeenMob> seenMobs;
     std::vector<VanishedCorpse> vanished;
 
-    // Convert game coordinates to client-area screen coordinates
-    // Warspear 2D top-down: player always centered, scale = pixels per game unit
-    static bool GameToClient(const GameContext& ctx, float gx, float gy, int& cx, int& cy) {
-        HWND w = ctx.gameWindow;
-        if (!w) return false;
-        RECT rc; GetClientRect(w, &rc);
-        int midX = (rc.right - rc.left) / 2;
-        int midY = (rc.bottom - rc.top) / 2;
-
-        float dx = gx - ctx.selfX;
-        float dy = gy - ctx.selfY;
-        float len = sqrtf(dx*dx + dy*dy);
-        if (len < 0.5f) { cx = midX; cy = midY; return true; }
-
-        cx = midX + (int)(dx * ctx.scale);
-        cy = midY + (int)(dy * ctx.scale);
-
-        if (cx < 5) cx = 5; if (cx > rc.right - 5) cx = rc.right - 5;
-        if (cy < 5) cy = 5; if (cy > rc.bottom - 5) cy = rc.bottom - 5;
-        return true;
-    }
-
-    // Physical mouse click at client coordinates
-    static void ClickAtClient(HWND gw, int cx, int cy) {
-        if (!gw) return;
-        if (GetForegroundWindow() != gw || IsIconic(gw)) return;
-
-        // Force foreground
-        DWORD fgTid = GetWindowThreadProcessId(gw, NULL);
-        DWORD myTid = GetCurrentThreadId();
-        AttachThreadInput(myTid, fgTid, TRUE);
-        SetForegroundWindow(gw);
-        AttachThreadInput(myTid, fgTid, FALSE);
-        if (GetForegroundWindow() != gw) return;
-
-        // Convert client to screen coords and click
-        POINT pt = {cx, cy};
-        ClientToScreen(gw, &pt);
-        int sx = GetSystemMetrics(SM_CXSCREEN);
-        int sy = GetSystemMetrics(SM_CYSCREEN);
-        if (pt.x < 0 || pt.x >= sx || pt.y < 0 || pt.y >= sy) return;
-
-        INPUT in[3] = {};
-        in[0].type = INPUT_MOUSE;
-        in[0].mi.dx = (LONG)(pt.x * 65536.0 / sx);
-        in[0].mi.dy = (LONG)(pt.y * 65536.0 / sy);
-        in[0].mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
-        in[1].type = INPUT_MOUSE; in[1].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
-        in[2].type = INPUT_MOUSE; in[2].mi.dwFlags = MOUSEEVENTF_LEFTUP;
-        SendInput(3, in, sizeof(INPUT));
+    // Cursor (WPM) no tile do corpse — substitui o clique fisico antigo
+    static void WriteCursorOnWorld(HANDLE hProc, float gameX, float gameY) {
+        DWORD curPtr = GetCursorPtr(hProc);
+        if (curPtr <= 0x1000) return;
+        WORD tileX = (WORD)((int)(gameX / 24.0f));
+        WORD tileY = (WORD)((int)(gameY / 24.0f));
+        if (tileX > 27) tileX = 27;
+        if (tileY > 27) tileY = 27;
+        int rawX = (int)tileX * 0x180000;
+        int rawY = (int)tileY * 0x180000;
+        WriteProcessMemory(hProc, (LPVOID)(curPtr + 0x08), &tileX, 2, NULL);
+        WriteProcessMemory(hProc, (LPVOID)(curPtr + 0x0A), &tileY, 2, NULL);
+        WriteProcessMemory(hProc, (LPVOID)(curPtr + 0x10), &rawX, 4, NULL);
+        WriteProcessMemory(hProc, (LPVOID)(curPtr + 0x14), &rawY, 4, NULL);
     }
 
     // Walk toward position using cursor memory + walk flag + Enter
@@ -348,15 +309,7 @@ private:
     }
 
     static void SendLocalEnter(HWND gw) {
-        if (!gw) return;
-        DWORD fgTid = GetWindowThreadProcessId(gw, NULL);
-        DWORD myTid = GetCurrentThreadId();
-        AttachThreadInput(myTid, fgTid, TRUE);
-        SetForegroundWindow(gw);
-        AttachThreadInput(myTid, fgTid, FALSE);
-        keybd_event(VK_RETURN, 0, 0, 0);
-        Sleep(30);
-        keybd_event(VK_RETURN, 0, KEYEVENTF_KEYUP, 0);
+        PostGameEnter(gw, 60);
     }
 
     static DWORD GetCursorPtr(HANDLE hProc) {

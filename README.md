@@ -154,6 +154,8 @@ sobrescreve a flag em poucos ms.
 3. **Não é preciso chamar função nenhuma** — o jogo recalcula `cursor+0x7C` sozinho
    em poucos ms (< 50 ms) a partir das coordenadas que você escreveu
 4. Verificar `cursor_action == 8` (espada) antes de confirmar ataque
+5. Confirmar com **Enter via `PostMessage`** (`WM_KEYDOWN`/`WM_KEYUP`) — não
+   exige janela em primeiro plano nem keyboard real
 
 > `HandleMoveOrAction` (`0x00A3F480`) **foi desabilitado**: o endereço morreu no patch
 > e chamá-lo quebrava o bot. Chamá-lo é hoje um no-op em `RemoteHandleMoveOrAction`.
@@ -209,7 +211,7 @@ Mob hostil listado aqui **não será atacado**. Mob hostil ausente daqui vira
 | `0x00000000` | `HandleSkillOrUse` (antes `0x00A3E0F0`) | **MORTO no patch — não usado** |
 
 Não há mais chamada ao jogo para ações: tudo passa por escrita no cursor +
-tecla real (Enter).
+Enter via `PostMessage`.
 
 ---
 
@@ -218,8 +220,8 @@ tecla real (Enter).
 1. **Targeter** seleciona mob mais próximo com HP > 0 (filtros: All/ByName/ByDistance)
 2. **Attacker** escreve o tile do mob no cursor (`+0x08/+0x0A` WORD, `+0x10/+0x14` DWORD)
 3. Espera 200 ms e lê `cursor+0x7C` — o jogo recalcula sozinho:
-   - `== 8` (espada) → envia **Enter** (via `AttachThreadInput` + `keybd_event`,
-     exige janela do jogo em primeiro plano)
+   - `== 8` (espada) → envia **Enter via `PostMessage`** (`PostGameEnter`,
+     sem foreground, sem `keybd_event`)
    - `!= 8` → tenta de novo; após **5 falhas** derruba o alvo e o estaciona 60 s
 
 > **Crítico (verificado em 24/09/2026):** o ataque **NÃO** deve escrever o alvo em
@@ -228,11 +230,20 @@ tecla real (Enter).
 > com cursor no mob (flag 8) e personagem adjacente funciona.
 4. **Looter** detecta corpses por `hp < 0`, escreve cursor no tile do loot e envia Enter
 
-### Por que não PostMessage?
+### Por que (não) PostMessage — atualizado 06/10/2026
 
-O Warspear Online usa DirectInput/raw input — `PostMessage` com `WM_KEYDOWN` não funciona.
-A solução é `AttachThreadInput` + `keybd_event(VK_RETURN)` para gerar input real.
-(O cursor não precisa de input: basta escrever as coordenadas em memória.)
+A crença antiga de que "Warspear usa DirectInput/raw input e `PostMessage` não
+funciona" estava **errada**. Comprovado ao vivo em 06/10/2026:
+
+- cursor WPM no tile + flag `13` (bota) + **Enter postado** → personagem **andou**;
+- cursor WPM no tile do mob + flag `8` (espada) + tecla `1` e Enter **postados** →
+  **dano** (Fada 203 → 3 → morte), tudo sem janela em foreground e sem mouse real.
+
+Hoje **todas** as teclas do bot são enviadas por `PostMessage`
+(`include/postkey.h`: `PostGameKey`/`PostGameEnter`), substituindo
+`keybd_event` + `AttachThreadInput` + `SetForegroundWindow` e `SendInput` —
+isso permite rodar **várias janelas do jogo ao mesmo tempo** sem disputar
+foco/teclado.
 
 ---
 
@@ -471,4 +482,4 @@ WAVE1 (matar) → PORTAL1 (andar + Enter no portal) → WAVE2 (matar, boss por �
 
 ### DLL (Legacy)
 
-`warspear-bot23.dll` é uma versão legada que usava arrow-key navigation via shared memory. O controller atual não precisa dela — tudo roda via `ReadProcessMemory`/`WriteProcessMemory` + `keybd_event` local (`AttachThreadInput`). A DLL continua sendo injetável pelos botões do controller, mas o fluxo de ataque/loot/follow vive no controller.
+`warspear-bot23.dll` é uma versão legada que usava arrow-key navigation via shared memory. O controller atual não precisa dela — tudo roda via `ReadProcessMemory`/`WriteProcessMemory` + teclas por `PostMessage` (`include/postkey.h`). A DLL continua sendo injetável pelos botões do controller, mas o fluxo de ataque/loot/follow vive no controller.

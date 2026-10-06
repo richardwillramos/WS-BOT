@@ -1,5 +1,6 @@
 #pragma once
 #include "../include/IModule.h"
+#include "../include/postkey.h"
 #include <string>
 #include <vector>
 #include <cmath>
@@ -45,7 +46,7 @@ public:
 
         if (ctx.hProcess == NULL) return;
         HWND gw = ctx.gameWindow;
-        if (!gw || GetForegroundWindow() != gw || IsIconic(gw)) return;
+        if (!gw || IsIconic(gw)) return;
 
         DWORD now = ctx.tickCount;
         int hostiles = CountHostiles(ctx);
@@ -365,14 +366,6 @@ private:
     }
 
     static void SendLocalEnter(HWND gw) {
-        if (!gw) return;
-        DWORD fgTid = GetWindowThreadProcessId(gw, NULL);
-        DWORD myTid = GetCurrentThreadId();
-        AttachThreadInput(myTid, fgTid, TRUE);
-        SetForegroundWindow(gw);
-        AttachThreadInput(myTid, fgTid, FALSE);
-        keybd_event(VK_RETURN, 0, 0, 0);
-        Sleep(30);
-        keybd_event(VK_RETURN, 0, KEYEVENTF_KEYUP, 0);
+        PostGameEnter(gw, 60);
     }
 };

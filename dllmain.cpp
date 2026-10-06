@@ -92,6 +92,7 @@ void PressGameKey(WORD vk) {
     LPARAM keyUp = keyDown | (1LL << 30) | (1LL << 31);
 
     PostMessageW(hw, WM_KEYDOWN, vk, keyDown);
+    Sleep(30);
     PostMessageW(hw, WM_KEYUP, vk, keyUp);
 }
 

@@ -1,5 +1,6 @@
 #pragma once
 #include "../include/IModule.h"
+#include "../include/postkey.h"
 #include <string>
 #include <cmath>
 
@@ -46,7 +47,7 @@ public:
         DWORD now = ctx.tickCount;
 
         HWND gw = ctx.gameWindow;
-        if (!gw || GetForegroundWindow() != gw || IsIconic(gw)) return;
+        if (!gw || IsIconic(gw)) return;
 
         // ---- 1) AUTO SELF-HEAL (prioridade 1, sempre por %) ----
         // Cooldown proprio: uma cura em si mesmo NAO atrasa a cura do alvo.
@@ -309,27 +310,11 @@ private:
     }
 
     static void SendGameKey(HWND gw, WORD vk) {
-        if (!gw) return;
-        DWORD fgTid = GetWindowThreadProcessId(gw, NULL);
-        DWORD myTid = GetCurrentThreadId();
-        AttachThreadInput(myTid, fgTid, TRUE);
-        SetForegroundWindow(gw);
-        AttachThreadInput(myTid, fgTid, FALSE);
-        keybd_event((BYTE)vk, 0, 0, 0);
-        Sleep(30);
-        keybd_event((BYTE)vk, 0, KEYEVENTF_KEYUP, 0);
+        PostGameKey(gw, vk, 30);
     }
 
     static void SendLocalEnter(HWND gw) {
-        if (!gw) return;
-        DWORD fgTid = GetWindowThreadProcessId(gw, NULL);
-        DWORD myTid = GetCurrentThreadId();
-        AttachThreadInput(myTid, fgTid, TRUE);
-        SetForegroundWindow(gw);
-        AttachThreadInput(myTid, fgTid, FALSE);
-        keybd_event(VK_RETURN, 0, 0, 0);
-        Sleep(30);
-        keybd_event(VK_RETURN, 0, KEYEVENTF_KEYUP, 0);
+        PostGameEnter(gw, 60);
     }
     HWND hParent = NULL;
     HWND hChkEnabled = NULL, hLblMinHp = NULL, hEdtMinHp = NULL, hEdtCooldown = NULL, hEdtHealKey = NULL;

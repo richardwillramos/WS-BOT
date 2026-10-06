@@ -1,5 +1,6 @@
 #pragma once
 #include "../include/IModule.h"
+#include "../include/postkey.h"
 #include <string>
 #include <cmath>
 
@@ -21,9 +22,9 @@ public:
         DWORD now = ctx.tickCount;
         if (now - lastFollowTick < (DWORD)cooldownMs) return;
 
-        // Foreground safety (same as backup)
+        // Foreground nao e mais exigido: tecla via PostMessage
         HWND gw = ctx.gameWindow;
-        if (!gw || GetForegroundWindow() != gw || IsIconic(gw)) return;
+        if (!gw || IsIconic(gw)) return;
 
         // Find target in player list
         bool found = false;
@@ -88,16 +89,8 @@ public:
             }
         }
 
-        // Send Enter locally (backup approach - keybd_event from controller process)
-        // The backup does AttachThreadInput + SetForegroundWindow + local keybd_event
-        DWORD fgTid = GetWindowThreadProcessId(gw, NULL);
-        DWORD myTid = GetCurrentThreadId();
-        AttachThreadInput(myTid, fgTid, TRUE);
-        SetForegroundWindow(gw);
-        AttachThreadInput(myTid, fgTid, FALSE);
-        keybd_event(VK_RETURN, 0, 0, 0);
-        Sleep(30);
-        keybd_event(VK_RETURN, 0, KEYEVENTF_KEYUP, 0);
+        // Enter via PostMessage (nao exige foreground)
+        PostGameEnter(gw, 60);
 
         lastFollowTick = now;
     }

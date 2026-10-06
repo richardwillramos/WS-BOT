@@ -1,5 +1,6 @@
 #pragma once
 #include "../include/IModule.h"
+#include "../include/postkey.h"
 #include <string>
 #include <vector>
 
@@ -45,14 +46,8 @@ public:
                 }
                 Sleep(100);
 
-                // Then cast heal key
-                INPUT inputs[2] = {};
-                inputs[0].type = INPUT_KEYBOARD;
-                inputs[0].ki.wVk = (WORD)member.healKeyBind;
-                inputs[1].type = INPUT_KEYBOARD;
-                inputs[1].ki.wVk = (WORD)member.healKeyBind;
-                inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
-                SendInput(2, inputs, sizeof(INPUT));
+                // Then cast heal key (PostMessage — sem teclado real)
+                PostGameKey(ctx.gameWindow, (UINT)member.healKeyBind, 50);
 
                 lastHealTick = now;
                 return; // one heal per tick

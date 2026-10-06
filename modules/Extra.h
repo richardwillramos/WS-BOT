@@ -1,5 +1,6 @@
 #pragma once
 #include "../include/IModule.h"
+#include "../include/postkey.h"
 #include <string>
 
 class ExtraModule : public IModule {
@@ -22,7 +23,7 @@ public:
         // baguncar dialogo de portal/bau/saida.
         if (buffEnabled && !ctx.dungeonBusy && now - lastBuffTick >= (DWORD)buffCooldownMs) {
             HWND gw = ctx.gameWindow;
-            if (gw && GetForegroundWindow() == gw && !IsIconic(gw)) {
+            if (gw && !IsIconic(gw)) {
                 DWORD curPtr = GetCursorPtr(ctx.hProcess);
                 if (curPtr > 0x1000) {
                     WriteCursorOnSelf(ctx.hProcess, curPtr, ctx.selfX, ctx.selfY);
@@ -35,15 +36,9 @@ public:
 
         if (now - lastTick < 5000) return; // 5 second interval
 
-        // Anti-AFK: press a key to prevent AFK kick
+        // Anti-AFK: tecla postada (nao afeta o teclado global)
         if (antiAfk) {
-            INPUT inputs[2] = {};
-            inputs[0].type = INPUT_KEYBOARD;
-            inputs[0].ki.wVk = VK_SPACE;
-            inputs[1].type = INPUT_KEYBOARD;
-            inputs[1].ki.wVk = VK_SPACE;
-            inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
-            SendInput(2, inputs, sizeof(INPUT));
+            PostGameKey(ctx.gameWindow, VK_SPACE, 50);
         }
 
         lastTick = now;
@@ -211,20 +206,10 @@ private:
         WriteProcessMemory(hProc, (LPVOID)(curPtr + 0x14), &rawY, 4, NULL);
     }
 
-    // key + Enter with foreground focus (same as healer self-heal)
+    // key + Enter via PostMessage (mesmo padrao do healer; sem foreground)
     static void SendBuffKey(HWND gw, int vk) {
-        if (!gw) return;
-        DWORD fgTid = GetWindowThreadProcessId(gw, NULL);
-        DWORD myTid = GetCurrentThreadId();
-        AttachThreadInput(myTid, fgTid, TRUE);
-        SetForegroundWindow(gw);
-        AttachThreadInput(myTid, fgTid, FALSE);
-        keybd_event((BYTE)vk, 0, 0, 0);
-        Sleep(50);
-        keybd_event((BYTE)vk, 0, KEYEVENTF_KEYUP, 0);
+        PostGameKey(gw, (UINT)vk, 50);
         Sleep(30);
-        keybd_event(VK_RETURN, 0, 0, 0);
-        Sleep(80);
-        keybd_event(VK_RETURN, 0, KEYEVENTF_KEYUP, 0);
+        PostGameEnter(gw, 80);
     }
 };

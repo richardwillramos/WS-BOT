@@ -126,6 +126,20 @@ struct BotState {
 
 static BotState* G = nullptr;
 
+// cfg dir = <exe>\config (LoadAll/SaveAll dos modulos)
+static void GetCfgDir(wchar_t* out, DWORD cch) {
+    GetModuleFileNameW(NULL, out, cch);
+    wchar_t* bs = wcsrchr(out, L'\\'); if (bs) *bs = 0;
+    wcscat_s(out, cch, L"\\config");
+}
+// Persiste na hora: fechar/matar o exe nao perde skills, buff key etc.
+static void SaveAllCfg() {
+    if (!G) return;
+    wchar_t dir[MAX_PATH];
+    GetCfgDir(dir, MAX_PATH);
+    G->modMgr.SaveAll(dir);
+}
+
 // ============================================================
 // Simple globals
 // ============================================================
@@ -340,8 +354,8 @@ static bool LoadNameList(const wchar_t* path, std::vector<std::wstring>& out, co
     const char* q = raw.c_str();
     const char* end = q + raw.size();
 
-    while (q < end && *q != '[') {              // find the array (skips quoted keys)
-        if (*q == '"') { q++; while (q < end && *q != '"') { if (*q == '\\') q++; q++; } }
+    while (q < end && *q != '[') {              // find the array (skip quoted strings, closing quote included)
+        if (*q == '"') { q++; while (q < end && *q != '"') { if (*q == '\\') q++; q++; } if (q < end) q++; }
         else q++;
     }
     if (q >= end) { DebugLog("[%s] no [...] array in %S - keeping current list", tag, path); return false; }
@@ -406,21 +420,26 @@ static bool LoadNpcNames(const wchar_t* path) {
 // "all mobs dead" ends the wave, no boss recognition needed
 std::vector<std::wstring> g_bossNames;
 
-static void ReloadBossNames() {
+// Monta <exe>\config\<file>; se nao existir, tenta <exe>\..\config\<file>
+// (funciona igual pra exe na raiz e pra exe em controller\)
+static void BuildConfigPath(const wchar_t* file, wchar_t* out, DWORD cch) {
     wchar_t dir[MAX_PATH];
     GetModuleFileNameW(NULL, dir, MAX_PATH);
     wchar_t* bs = wcsrchr(dir, L'\\'); if (bs) *bs = 0;
+    swprintf_s(out, cch, L"%s\\config\\%s", dir, file);
+    if (GetFileAttributesW(out) != INVALID_FILE_ATTRIBUTES) return;
+    swprintf_s(out, cch, L"%s\\..\\config\\%s", dir, file);
+}
+
+static void ReloadBossNames() {
     wchar_t path[MAX_PATH];
-    swprintf_s(path, L"%s\\config\\boss_names.json", dir);
+    BuildConfigPath(L"boss_names.json", path, MAX_PATH);
     LoadNameList(path, g_bossNames, "BOSS");
 }
 
 static void ReloadNpcNames() {
-    wchar_t dir[MAX_PATH];
-    GetModuleFileNameW(NULL, dir, MAX_PATH);
-    wchar_t* bs = wcsrchr(dir, L'\\'); if (bs) *bs = 0;
     wchar_t path[MAX_PATH];
-    swprintf_s(path, L"%s\\config\\npc_names.json", dir);
+    BuildConfigPath(L"npc_names.json", path, MAX_PATH);
     LoadNpcNames(path);
 }
 
@@ -580,8 +599,8 @@ void TraverseTree(DWORD node, std::vector<EntityData>& entities, std::vector<Cor
     e.mana=Read<int>(objPtr+Game::ENT_MANA); e.maxMana=Read<int>(objPtr+Game::ENT_MAX_MANA);
     int ti=Read<int>(objPtr+Game::ENT_TYPE_IND);
     if (vtable==Game::VT_PLAYER||ti==1) e.type=1;
+    else if (IsNPC(e.name)) e.type=3;   // lista manual tem prioridade (ex: "Gerbo" e VT_BEAST)
     else if (vtable==Game::VT_BEAST) e.type=4;
-    else if (IsNPC(e.name)) e.type=3;
     else e.type=2;
     e.level=Read<BYTE>(objPtr+Game::ENT_LEVEL);
     e.classId=Read<BYTE>(objPtr+Game::ENT_CLASS_IND);
@@ -1108,15 +1127,17 @@ void RefreshTree() {
     swprintf(b,256,L"Max distance: %d", (int)G->looter.lootMaxDistance);
     TreeSetItemText(MID_LOOTER, 3, b);
 
-    TreeSetItemText(MID_EXTRA, 0, G->extra.antiAfk ? L"Anti AFK: ON" : L"Anti AFK: OFF");
-    TreeSetItemText(MID_EXTRA, 1, G->extra.autoRevive ? L"Auto Revive: ON" : L"Auto Revive: OFF");
-    TreeSetItemText(MID_EXTRA, 2, G->extra.autoSell ? L"Auto Sell: ON" : L"Auto Sell: OFF");
-    TreeSetItemText(MID_EXTRA, 3, G->extra.autoRepair ? L"Auto Repair: ON" : L"Auto Repair: OFF");
-    TreeSetItemText(MID_EXTRA, 4, G->extra.buffEnabled ? L"Auto Buff: ON" : L"Auto Buff: OFF");
-    swprintf(b,256,L"Buff key: %c", G->extra.buffKey);
-    TreeSetItemText(MID_EXTRA, 5, b);
+    TreeSetItemText(MID_EXTRA, 0, G->extra.enabled ? L"Status: true" : L"Status: false");
+    TreeSetItemText(MID_EXTRA, 1, G->extra.antiAfk ? L"Anti AFK: ON" : L"Anti AFK: OFF");
+    TreeSetItemText(MID_EXTRA, 2, G->extra.autoRevive ? L"Auto Revive: ON" : L"Auto Revive: OFF");
+    TreeSetItemText(MID_EXTRA, 3, G->extra.autoSell ? L"Auto Sell: ON" : L"Auto Sell: OFF");
+    TreeSetItemText(MID_EXTRA, 4, G->extra.autoRepair ? L"Auto Repair: ON" : L"Auto Repair: OFF");
+    TreeSetItemText(MID_EXTRA, 5, G->extra.buffEnabled ? L"Auto Buff: ON" : L"Auto Buff: OFF");
+    { std::wstring bk = G->extra.BuffKeysCsv();
+      swprintf(b,256,L"Buff keys: %s", bk.empty() ? L"(none)" : bk.c_str());
+      TreeSetItemText(MID_EXTRA, 6, b); }
     swprintf(b,256,L"Buff cooldown: %d ms", G->extra.buffCooldownMs);
-    TreeSetItemText(MID_EXTRA, 6, b);
+    TreeSetItemText(MID_EXTRA, 7, b);
 
     TreeSetItemText(MID_DUNGEON, 0, G->dungeon.enabled ? L"Status: true" : L"Status: false");
     swprintf(b,256,L"Phase: %s", G->dungeon.PhaseName());
@@ -1168,17 +1189,19 @@ void TreeHandleClick(NMTREEVIEWW* ntv) {
             if (td.subId == 0) G->looter.enabled = !G->looter.enabled;
             break;
         case MID_EXTRA:
-            if (td.subId == 0) G->extra.antiAfk = !G->extra.antiAfk;
-            else if (td.subId == 1) G->extra.autoRevive = !G->extra.autoRevive;
-            else if (td.subId == 2) G->extra.autoSell = !G->extra.autoSell;
-            else if (td.subId == 3) G->extra.autoRepair = !G->extra.autoRepair;
-            else if (td.subId == 4) G->extra.buffEnabled = !G->extra.buffEnabled;
+            if (td.subId == 0) G->extra.enabled = !G->extra.enabled;
+            else if (td.subId == 1) G->extra.antiAfk = !G->extra.antiAfk;
+            else if (td.subId == 2) G->extra.autoRevive = !G->extra.autoRevive;
+            else if (td.subId == 3) G->extra.autoSell = !G->extra.autoSell;
+            else if (td.subId == 4) G->extra.autoRepair = !G->extra.autoRepair;
+            else if (td.subId == 5) G->extra.buffEnabled = !G->extra.buffEnabled;
             break;
         case MID_DUNGEON:
             if (td.subId == 0) G->dungeon.enabled = !G->dungeon.enabled;
             else if (td.subId == 7) G->dungeon.lootInWaves = !G->dungeon.lootInWaves;
             break;
         }
+        SaveAllCfg();
         RefreshTree();
         break;
 
@@ -1230,10 +1253,17 @@ void TreeHandleClick(NMTREEVIEWW* ntv) {
             else if (td.subId == 2) { v = ShowInputInt(g_hWnd, L"Cooldown (ms)", G->looter.cooldownMs); G->looter.cooldownMs = v; }
             else if (td.subId == 3) { v = ShowInputInt(g_hWnd, L"Max Distance", (int)G->looter.lootMaxDistance); G->looter.lootMaxDistance = (float)v; }
             break;
-        case MID_EXTRA:
-            if (td.subId == 5) { v = ShowInputInt(g_hWnd, L"Buff key (1-9)", G->extra.buffKey - 0x30); if (v >= 1 && v <= 9) G->extra.buffKey = 0x30 + v; }
-            else if (td.subId == 6) { v = ShowInputInt(g_hWnd, L"Buff cooldown (ms)", G->extra.buffCooldownMs); if (v > 0) G->extra.buffCooldownMs = v; }
+        case MID_EXTRA: {
+            if (td.subId == 6) {
+                wchar_t cur[128] = {}, buf[128] = {};
+                std::wstring cs = G->extra.BuffKeysCsv();
+                if (!cs.empty()) wcsncpy_s(cur, cs.c_str(), _TRUNCATE);
+                if (ShowInputString(g_hWnd, L"Buff keys (ex: 5, 6, 7)", cur, buf, 128))
+                    G->extra.SetBuffKeys(buf);
+            }
+            else if (td.subId == 7) { v = ShowInputInt(g_hWnd, L"Buff cooldown (ms)", G->extra.buffCooldownMs); if (v > 0) G->extra.buffCooldownMs = v; }
             break;
+        }
         case MID_DUNGEON: {
             wchar_t buf[128] = {};
             if (td.subId == 2) { ShowInputString(g_hWnd, L"Portal name (walkable)", G->dungeon.portal1Name.c_str(), buf, 128); if (buf[0]) G->dungeon.portal1Name = buf; }
@@ -1244,6 +1274,7 @@ void TreeHandleClick(NMTREEVIEWW* ntv) {
             else if (td.subId == 8) { v = ShowInputInt(g_hWnd, L"Loot tries (chest)", G->dungeon.collectTries); if (v > 0) G->dungeon.collectTries = v; }
             break; }
         }
+        SaveAllCfg();
         RefreshTree();
         break;
     }
@@ -1442,18 +1473,20 @@ void CreateConfigPanel(HWND parent) {
     // Extra
     g_hTreeParent[MID_EXTRA] = TreeAddItem(g_hTree, TVI_ROOT, MOD_NAMES[MID_EXTRA], -1);
     { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_EXTRA, TREE_TOGGLE, 0});
-    g_hTreeChild[MID_EXTRA][g_treeChildCount[MID_EXTRA]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_EXTRA], L"Anti AFK: OFF", idx); }
+    g_hTreeChild[MID_EXTRA][g_treeChildCount[MID_EXTRA]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_EXTRA], L"Status: false", idx); }
     { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_EXTRA, TREE_TOGGLE, 1});
-    g_hTreeChild[MID_EXTRA][g_treeChildCount[MID_EXTRA]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_EXTRA], L"Auto Revive: OFF", idx); }
+    g_hTreeChild[MID_EXTRA][g_treeChildCount[MID_EXTRA]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_EXTRA], L"Anti AFK: OFF", idx); }
     { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_EXTRA, TREE_TOGGLE, 2});
-    g_hTreeChild[MID_EXTRA][g_treeChildCount[MID_EXTRA]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_EXTRA], L"Auto Sell: OFF", idx); }
+    g_hTreeChild[MID_EXTRA][g_treeChildCount[MID_EXTRA]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_EXTRA], L"Auto Revive: OFF", idx); }
     { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_EXTRA, TREE_TOGGLE, 3});
-    g_hTreeChild[MID_EXTRA][g_treeChildCount[MID_EXTRA]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_EXTRA], L"Auto Repair: OFF", idx); }
+    g_hTreeChild[MID_EXTRA][g_treeChildCount[MID_EXTRA]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_EXTRA], L"Auto Sell: OFF", idx); }
     { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_EXTRA, TREE_TOGGLE, 4});
+    g_hTreeChild[MID_EXTRA][g_treeChildCount[MID_EXTRA]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_EXTRA], L"Auto Repair: OFF", idx); }
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_EXTRA, TREE_TOGGLE, 5});
     g_hTreeChild[MID_EXTRA][g_treeChildCount[MID_EXTRA]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_EXTRA], L"Auto Buff: OFF", idx); }
-    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_EXTRA, TREE_VALUE, 5});
-    g_hTreeChild[MID_EXTRA][g_treeChildCount[MID_EXTRA]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_EXTRA], L"Buff key: 5", idx); }
     { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_EXTRA, TREE_VALUE, 6});
+    g_hTreeChild[MID_EXTRA][g_treeChildCount[MID_EXTRA]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_EXTRA], L"Buff keys: 5", idx); }
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_EXTRA, TREE_VALUE, 7});
     g_hTreeChild[MID_EXTRA][g_treeChildCount[MID_EXTRA]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_EXTRA], L"Buff cooldown: 10000 ms", idx); }
 
     // Dungeon
@@ -1864,9 +1897,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         G->modMgr.Add(&G->extra);
 
         wchar_t cfgDir[MAX_PATH];
-        GetModuleFileNameW(NULL, cfgDir, MAX_PATH);
-        wchar_t* bs = wcsrchr(cfgDir, L'\\'); if (bs) *bs = 0;
-        wcscat(cfgDir, L"\\config");
+        GetCfgDir(cfgDir, MAX_PATH);
         G->modMgr.LoadAll(cfgDir);
         ReloadNpcNames();
         ReloadBossNames();
@@ -2094,11 +2125,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
     case WM_DESTROY:
         DebugLog("[EXIT] Shutting down...");
-        { wchar_t cfgDir[MAX_PATH];
-        GetModuleFileNameW(NULL, cfgDir, MAX_PATH);
-        wchar_t* b = wcsrchr(cfgDir, L'\\'); if (b) *b = 0;
-        wcscat(cfgDir, L"\\config");
-        G->modMgr.SaveAll(cfgDir); }
+        { wchar_t cfgDir[MAX_PATH]; GetCfgDir(cfgDir, MAX_PATH); G->modMgr.SaveAll(cfgDir); }
         G->modMgr.StopAll();
         if (g_hFont) DeleteObject(g_hFont);
         if (g_hTreeFont) DeleteObject(g_hTreeFont);

@@ -2,6 +2,7 @@
 #include "../include/IModule.h"
 #include "../include/postkey.h"
 #include <string>
+#include <vector>
 
 class ExtraModule : public IModule {
 public:
@@ -19,17 +20,26 @@ public:
         DWORD now = ctx.tickCount;
 
         // AUTO-BUFF: cursor no proprio char + tecla + Enter (mesmo padrao do
-        // self-heal do healer). Pula durante interacoes da dungeon para nao
-        // baguncar dialogo de portal/bau/saida.
-        if (buffEnabled && !ctx.dungeonBusy && now - lastBuffTick >= (DWORD)buffCooldownMs) {
-            HWND gw = ctx.gameWindow;
-            if (gw && !IsIconic(gw)) {
-                DWORD curPtr = GetCursorPtr(ctx.hProcess);
-                if (curPtr > 0x1000) {
-                    WriteCursorOnSelf(ctx.hProcess, curPtr, ctx.selfX, ctx.selfY);
-                    SendBuffKey(gw, buffKey);
-                    lastBuffTick = now;
-                    DebugLog("[EXTRA] Auto buff (key %c)", (char)buffKey);
+        // self-heal do healer). Rotacao LRU entre as teclas configuradas
+        // (BuffKey="5,6,7" -> gira todas, uma por buffCooldown, como o Attacker).
+        // Pula durante interacoes da dungeon para nao baguncar dialogo.
+        if (buffEnabled && !ctx.dungeonBusy && !buffSkills.empty()) {
+            int best = -1; DWORD bestAge = 0;
+            for (size_t i = 0; i < buffSkills.size(); i++) {
+                DWORD age = now - buffSkills[i].lastUsed;
+                if (age < (DWORD)buffCooldownMs) continue;
+                if (best < 0 || age > bestAge) { best = (int)i; bestAge = age; }
+            }
+            if (best >= 0) {
+                HWND gw = ctx.gameWindow;
+                if (gw && !IsIconic(gw)) {
+                    DWORD curPtr = GetCursorPtr(ctx.hProcess);
+                    if (curPtr > 0x1000) {
+                        WriteCursorOnSelf(ctx.hProcess, curPtr, ctx.selfX, ctx.selfY);
+                        SendBuffKey(gw, buffSkills[best].vk);
+                        buffSkills[best].lastUsed = now;
+                        DebugLog("[EXTRA] Auto buff (key %c)", (char)buffSkills[best].vk);
+                    }
                 }
             }
         }
@@ -51,8 +61,35 @@ public:
     bool  autoSell = false;
     bool  autoRepair = false;
     bool  buffEnabled = false;
-    int   buffKey = 0x35;        // '5'
-    int   buffCooldownMs = 10000;
+    int   buffCooldownMs = 10000;   // cooldown POR tecla de buff
+
+    struct BuffSkill { int vk = 0; DWORD lastUsed = 0; };
+    std::vector<BuffSkill> buffSkills;   // "5,6,7" -> rotacao LRU
+
+    // "5, 6, 7" -> lista (qualquer contagem; ordem = ordem da rotacao)
+    void SetBuffKeys(const wchar_t* csv) {
+        buffSkills.clear();
+        if (!csv) return;
+        for (const wchar_t* p = csv; *p; p++) {
+            wchar_t c = *p;
+            if (c == L' ' || c == L'\t' || c == L',') continue;
+            if (buffSkills.size() >= 12) break;
+            bool dup = false;
+            for (auto& b : buffSkills) if (b.vk == (int)c) { dup = true; break; }
+            if (dup) continue;
+            BuffSkill b; b.vk = (int)c;
+            buffSkills.push_back(b);
+        }
+    }
+
+    std::wstring BuffKeysCsv() const {
+        std::wstring s;
+        for (size_t i = 0; i < buffSkills.size(); i++) {
+            if (i) s += L",";
+            s += (wchar_t)buffSkills[i].vk;
+        }
+        return s;
+    }
 
     void LoadConfig(const wchar_t* path) override {
         wchar_t buf[256];
@@ -69,7 +106,7 @@ public:
         GetPrivateProfileStringW(L"Extra", L"BuffEnabled", L"0", buf, 256, path);
         buffEnabled = (buf[0] == L'1');
         GetPrivateProfileStringW(L"Extra", L"BuffKey", L"5", buf, 256, path);
-        buffKey = buf[0] ? buf[0] : 0x35;
+        SetBuffKeys(buf);
         GetPrivateProfileStringW(L"Extra", L"BuffCooldown", L"10000", buf, 256, path);
         buffCooldownMs = _wtoi(buf);
         if (buffCooldownMs <= 0) buffCooldownMs = 10000;
@@ -82,8 +119,8 @@ public:
         WritePrivateProfileStringW(L"Extra", L"AutoSell", autoSell ? L"1" : L"0", path);
         WritePrivateProfileStringW(L"Extra", L"AutoRepair", autoRepair ? L"1" : L"0", path);
         WritePrivateProfileStringW(L"Extra", L"BuffEnabled", buffEnabled ? L"1" : L"0", path);
-        wchar_t bk[2] = { (wchar_t)buffKey, 0 };
-        WritePrivateProfileStringW(L"Extra", L"BuffKey", bk, path);
+        std::wstring bk = BuffKeysCsv();
+        WritePrivateProfileStringW(L"Extra", L"BuffKey", bk.c_str(), path);
         wchar_t buf[16];
         swprintf_s(buf, L"%d", buffCooldownMs);
         WritePrivateProfileStringW(L"Extra", L"BuffCooldown", buf, path);
@@ -144,7 +181,7 @@ public:
         if (hChkAutoSell) SendMessage(hChkAutoSell, BM_SETCHECK, autoSell ? BST_CHECKED : BST_UNCHECKED, 0);
         if (hChkAutoRepair) SendMessage(hChkAutoRepair, BM_SETCHECK, autoRepair ? BST_CHECKED : BST_UNCHECKED, 0);
         if (hChkBuff) SendMessage(hChkBuff, BM_SETCHECK, buffEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
-        if (hEdtBuffKey) { wchar_t b[4] = { (wchar_t)buffKey, 0 }; SetWindowTextW(hEdtBuffKey, b); }
+        if (hEdtBuffKey) SetWindowTextW(hEdtBuffKey, BuffKeysCsv().c_str());
         if (hEdtBuffCd) { wchar_t b[16]; swprintf_s(b, L"%d", buffCooldownMs); SetWindowTextW(hEdtBuffCd, b); }
     }
 
@@ -162,8 +199,8 @@ public:
         if (id == 9506 && code == BN_CLICKED)
             buffEnabled = (SendMessage(hChkBuff, BM_GETCHECK, 0, 0) == BST_CHECKED);
         if (id == 9507 && code == EN_CHANGE) {
-            wchar_t b[4] = {}; GetWindowTextW(hEdtBuffKey, b, 4);
-            if (b[0]) buffKey = b[0];
+            wchar_t b[64] = {}; GetWindowTextW(hEdtBuffKey, b, 64);
+            if (b[0]) SetBuffKeys(b);
         }
         if (id == 9508 && code == EN_CHANGE) {
             wchar_t b[16]; GetWindowTextW(hEdtBuffCd, b, 16);
@@ -178,7 +215,6 @@ private:
     HWND hChkAutoRevive = NULL, hChkAutoSell = NULL, hChkAutoRepair = NULL;
     HWND hChkBuff = NULL, hEdtBuffKey = NULL, hEdtBuffCd = NULL;
     DWORD lastTick = 0;
-    DWORD lastBuffTick = 0;
 
     static DWORD GetCursorPtr(HANDLE hProc) {
         DWORD gmPtr = 0; SIZE_T r = 0;

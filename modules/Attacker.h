@@ -151,13 +151,20 @@ public:
                 DebugLog("[ATTACK] Sword detected! action=%d, sending Enter", action);
 
                 // Fire a ready skill (cursor is already on the mob) instead of
-                // the plain hit; key + Enter, same pattern as the healer
+                // the plain hit; key + Enter, same pattern as the healer.
+                // Least-recently-used entre as prontas = gira TODA a lista
+                // ("5,1,2,3" -> 5,1,2,3,5,1,...). O pick por prioridade travava
+                // nas 2 primeiras: com CD 1500 e ataque ~1s, 5 e 1 se
+                // alternavam e 2/3 nunca saiam.
                 SkillEntry* sk = nullptr;
+                DWORD bestAge = 0;
                 for (auto& s : skills) {
                     if (!s.enabled || !s.keyBind) continue;
-                    int cd = s.cooldownMs > 0 ? s.cooldownMs : 1500; // default per skill
-                    if (now - s.lastUsedTick < (DWORD)cd) continue;
-                    if (!sk || s.priority < sk->priority) sk = &s;
+                    int cd = s.cooldownMs > 0 ? s.cooldownMs
+                            : (globalCooldownMs > 0 ? globalCooldownMs : 1500);
+                    DWORD age = now - s.lastUsedTick;  // nunca usada = idade enorme
+                    if (age < (DWORD)cd) continue;
+                    if (!sk || age > bestAge) { sk = &s; bestAge = age; }
                 }
                 if (sk) {
                     DebugLog("[ATTACK] Skill '%S' key=%c", sk->name.c_str(), (char)sk->keyBind);
@@ -207,8 +214,8 @@ public:
     int   globalCooldownMs = 1500;
     std::vector<SkillEntry> skills;
 
-    // UI dialog: "1, 2, 3, 4" -> skills list (any count, order = priority;
-    // cooldown falls back to per-skill default 1500 ms)
+    // UI dialog: "1, 2, 3, 4" -> skills list (any count up to 12; order =
+    // rotation order; cooldown falls back to Attacker GlobalCooldown, then 1500 ms)
     void SetSkillKeys(const wchar_t* csv) {
         skills.clear();
         if (!csv) return;
@@ -216,6 +223,7 @@ public:
         for (const wchar_t* p = csv; *p; p++) {
             wchar_t c = *p;
             if (c == L' ' || c == L'\t' || c == L',') continue;
+            if (skills.size() >= 12) break;
             SkillEntry s;
             wchar_t nm[16]; swprintf_s(nm, L"Skill %c", c);
             s.name = nm;
@@ -235,7 +243,7 @@ public:
         globalCooldownMs = _wtoi(buf);
 
         skills.clear();
-        for (int i = 1; i <= 6; i++) {
+        for (int i = 1; i <= 12; i++) {
             wchar_t sec[16]; swprintf_s(sec, L"Skill%d", i);
             wchar_t name[64], key[32], cd[16], pri[16], en[16];
             swprintf_s(name, L"%sName", sec);
@@ -284,6 +292,15 @@ public:
             swprintf_s(buf, L"%d", skills[i].priority);
             WritePrivateProfileStringW(L"Attacker", priK, buf, path);
             WritePrivateProfileStringW(L"Attacker", enK, skills[i].enabled ? L"1" : L"0", path);
+        }
+        // limpa slots de uma lista maior anterior (skill removida nao volta no restart)
+        for (int i = (int)skills.size() + 1; i <= 12; i++) {
+            wchar_t sec[16]; swprintf_s(sec, L"Skill%d", i);
+            wchar_t nameK[32], keyK[32];
+            swprintf_s(nameK, L"%sName", sec);
+            swprintf_s(keyK, L"%sKey", sec);
+            WritePrivateProfileStringW(L"Attacker", nameK, L"", path);
+            WritePrivateProfileStringW(L"Attacker", keyK, L"", path);
         }
     }
 

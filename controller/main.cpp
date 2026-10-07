@@ -1133,11 +1133,23 @@ void RefreshTree() {
     TreeSetItemText(MID_EXTRA, 3, G->extra.autoSell ? L"Auto Sell: ON" : L"Auto Sell: OFF");
     TreeSetItemText(MID_EXTRA, 4, G->extra.autoRepair ? L"Auto Repair: ON" : L"Auto Repair: OFF");
     TreeSetItemText(MID_EXTRA, 5, G->extra.buffEnabled ? L"Auto Buff: ON" : L"Auto Buff: OFF");
-    { std::wstring bk = G->extra.BuffKeysCsv();
-      swprintf(b,256,L"Buff keys: %s", bk.empty() ? L"(none)" : bk.c_str());
+    { std::wstring bk;
+      for (auto& s : G->extra.buffSkills) {
+          if (!bk.empty()) bk += L",";
+          bk += (wchar_t)s.vk;
+          if (G->extra.HasSlot(s.vk)) bk += L"*";
+      }
+      swprintf(b,256,L"Buff keys: %s%s", bk.empty() ? L"(none)" : bk.c_str(), bk.empty() ? L"" : L" (*=slot)");
       TreeSetItemText(MID_EXTRA, 6, b); }
     swprintf(b,256,L"Buff cooldown: %d ms", G->extra.buffCooldownMs);
     TreeSetItemText(MID_EXTRA, 7, b);
+    TreeSetItemText(MID_EXTRA, 8, G->extra.buffSelf ? L"Buff self: ON" : L"Buff self: OFF");
+    if (G->extra.targetName.empty())
+        TreeSetItemText(MID_EXTRA, 9, L"Buff target: (none)");
+    else {
+        swprintf(b,256,L"Buff target: %s", G->extra.targetName.c_str());
+        TreeSetItemText(MID_EXTRA, 9, b);
+    }
 
     TreeSetItemText(MID_DUNGEON, 0, G->dungeon.enabled ? L"Status: true" : L"Status: false");
     swprintf(b,256,L"Phase: %s", G->dungeon.PhaseName());
@@ -1195,6 +1207,7 @@ void TreeHandleClick(NMTREEVIEWW* ntv) {
             else if (td.subId == 3) G->extra.autoSell = !G->extra.autoSell;
             else if (td.subId == 4) G->extra.autoRepair = !G->extra.autoRepair;
             else if (td.subId == 5) G->extra.buffEnabled = !G->extra.buffEnabled;
+            else if (td.subId == 8) G->extra.buffSelf = !G->extra.buffSelf;
             break;
         case MID_DUNGEON:
             if (td.subId == 0) G->dungeon.enabled = !G->dungeon.enabled;
@@ -1255,11 +1268,55 @@ void TreeHandleClick(NMTREEVIEWW* ntv) {
             break;
         case MID_EXTRA: {
             if (td.subId == 6) {
-                wchar_t cur[128] = {}, buf[128] = {};
-                std::wstring cs = G->extra.BuffKeysCsv();
-                if (!cs.empty()) wcsncpy_s(cur, cs.c_str(), _TRUNCATE);
-                if (ShowInputString(g_hWnd, L"Buff keys (ex: 5, 6, 7)", cur, buf, 128))
-                    G->extra.SetBuffKeys(buf);
+                std::vector<std::wstring> opts = {
+                    L"Edit keys (ex: 5, 6, 7)",
+                    L"Capture slot(s): hover icon -> OK -> 3s",
+                    L"Clear captured slots"
+                };
+                int m = ShowSelectionList(g_hWnd, L"Buff keys", L"Options:", opts);
+                if (m == 0) {
+                    wchar_t cur[128] = {}, buf[128] = {};
+                    std::wstring cs = G->extra.BuffKeysCsv();
+                    if (!cs.empty()) wcsncpy_s(cur, cs.c_str(), _TRUNCATE);
+                    if (ShowInputString(g_hWnd, L"Buff keys (ex: 5, 6, 7)", cur, buf, 128))
+                        G->extra.SetBuffKeys(buf);
+                } else if (m == 1) {
+                    HWND gw = FindGameWindow();
+                    if (!gw) {
+                        MessageBoxW(g_hWnd, L"Game window not found.", L"Capture", MB_OK | MB_ICONWARNING);
+                    } else {
+                        for (;;) {
+                            int vk = 0;
+                            for (auto& s : G->extra.buffSkills)
+                                if (!G->extra.HasSlot(s.vk)) { vk = s.vk; break; }
+                            if (!vk) break;  // todos capturados
+                            wchar_t msg[512];
+                            swprintf(msg, 512,
+                                L"Capture da skill '%c':\n\n"
+                                L"1. Deixe o JOGO visivel (nao coberto).\n"
+                                L"2. Posicione o mouse SOBRE o icone da skill '%c' no hotbar.\n"
+                                L"3. Clique OK e NAO mexa o mouse por 3 segundos.\n\n"
+                                L"(Cancelar encerra a captura)", vk, vk);
+                            if (MessageBoxW(g_hWnd, msg, L"Capture buff slot",
+                                            MB_OKCANCEL | MB_ICONINFORMATION) != IDOK) break;
+                            Sleep(3000);
+                            POINT pt;
+                            if (GetCursorPos(&pt) && ScreenToClient(gw, &pt)) {
+                                RECT rc; GetClientRect(gw, &rc);
+                                if (pt.x >= 0 && pt.y >= 0 && pt.x < rc.right && pt.y < rc.bottom) {
+                                    G->extra.SetSlot(vk, pt.x, pt.y);
+                                    DebugLog("[EXTRA] Captured slot '%c' at (%d,%d)", (char)vk, (int)pt.x, (int)pt.y);
+                                } else {
+                                    DebugLog("[EXTRA] Capture failed: cursor outside game client (%d,%d)", (int)pt.x, (int)pt.y);
+                                }
+                            } else {
+                                DebugLog("[EXTRA] Capture failed: GetCursorPos/ScreenToClient");
+                            }
+                        }
+                    }
+                } else if (m == 2) {
+                    G->extra.ClearSlots();
+                }
             }
             else if (td.subId == 7) { v = ShowInputInt(g_hWnd, L"Buff cooldown (ms)", G->extra.buffCooldownMs); if (v > 0) G->extra.buffCooldownMs = v; }
             break;
@@ -1324,6 +1381,30 @@ void TreeHandleClick(NMTREEVIEWW* ntv) {
                 G->healer.targetName = G->cachedPlayers[sel - 1].name;
                 G->healer.targetAddr = G->cachedPlayers[sel - 1].objAddr;
             }
+            RefreshTree();
+        }
+        else if (td.module == MID_EXTRA && td.subId == 9) {
+            std::vector<std::wstring> options;
+            options.push_back(L"(none) - clear target");
+            for (auto& p : G->cachedPlayers) {
+                if (p.hp <= 0) continue;
+                wchar_t entry[128];
+                swprintf(entry, 128, L"%s (Lv.%d, HP:%d/%d, %.0fm)", p.name, p.level, p.hp, p.maxHp, p.distance);
+                options.push_back(entry);
+            }
+            if (options.size() == 1) {
+                MessageBoxW(g_hWnd, L"No players nearby.", L"Buff Target", MB_OK|MB_ICONINFORMATION);
+                break;
+            }
+            int sel = ShowSelectionList(g_hWnd, L"Select player to buff", L"Pick a target:", options);
+            if (sel == 0) {
+                G->extra.targetName.clear();
+                G->extra.targetAddr = 0;
+            } else if (sel > 0 && sel < (int)G->cachedPlayers.size() + 1) {
+                G->extra.targetName = G->cachedPlayers[sel - 1].name;
+                G->extra.targetAddr = G->cachedPlayers[sel - 1].objAddr;
+            }
+            SaveAllCfg();
             RefreshTree();
         }
         break;
@@ -1488,6 +1569,10 @@ void CreateConfigPanel(HWND parent) {
     g_hTreeChild[MID_EXTRA][g_treeChildCount[MID_EXTRA]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_EXTRA], L"Buff keys: 5", idx); }
     { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_EXTRA, TREE_VALUE, 7});
     g_hTreeChild[MID_EXTRA][g_treeChildCount[MID_EXTRA]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_EXTRA], L"Buff cooldown: 10000 ms", idx); }
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_EXTRA, TREE_TOGGLE, 8});
+    g_hTreeChild[MID_EXTRA][g_treeChildCount[MID_EXTRA]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_EXTRA], L"Buff self: ON", idx); }
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_EXTRA, TREE_SELECT, 9});
+    g_hTreeChild[MID_EXTRA][g_treeChildCount[MID_EXTRA]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_EXTRA], L"Buff target: (none)", idx); }
 
     // Dungeon
     g_hTreeParent[MID_DUNGEON] = TreeAddItem(g_hTree, TVI_ROOT, MOD_NAMES[MID_DUNGEON], -1);

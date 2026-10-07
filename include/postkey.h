@@ -20,3 +20,15 @@ inline void PostGameKey(HWND gw, UINT vk, DWORD holdMs = 50) {
 inline void PostGameEnter(HWND gw, DWORD holdMs = 80) {
     PostGameKey(gw, VK_RETURN, holdMs);
 }
+
+// Clique direito sintetico em (cx,cy) client — self buff: seleciona a skill
+// e clica com o BOTAO DIREITO (diferente do ataque = skill + clique esquerdo
+// no alvo). PostMessage puro: nao move o mouse real nem rouba foreground.
+inline void PostGameRightClick(HWND gw, int cx, int cy, DWORD holdMs = 30) {
+    if (!gw || !IsWindow(gw)) return;
+    LPARAM lp = MAKELPARAM(cx, cy);
+    PostMessageW(gw, WM_MOUSEMOVE, 0, lp);
+    PostMessageW(gw, WM_RBUTTONDOWN, MK_RBUTTON, lp);
+    if (holdMs) Sleep(holdMs);
+    PostMessageW(gw, WM_RBUTTONUP, 0, lp);
+}

@@ -3,6 +3,7 @@
 #include "../include/postkey.h"
 #include <string>
 #include <vector>
+#include <map>
 
 class ExtraModule : public IModule {
 public:
@@ -10,8 +11,8 @@ public:
     bool IsEnabled() const override { return enabled; }
     void SetEnabled(bool e) override { enabled = e; }
 
-    void Start() override { lastTick = 0; }
-    void Stop() override  { lastTick = 0; }
+    void Start() override { lastTick = 0; phaseInit = false; }
+    void Stop() override  { lastTick = 0; phaseInit = false; }
 
     void Tick(const GameContext& ctx) override {
         extern void DebugLog(const char* fmt, ...);
@@ -19,26 +20,77 @@ public:
 
         DWORD now = ctx.tickCount;
 
-        // AUTO-BUFF: cursor no proprio char + tecla + Enter (mesmo padrao do
-        // self-heal do healer). Rotacao LRU entre as teclas configuradas
-        // (BuffKey="5,6,7" -> gira todas, uma por buffCooldown, como o Attacker).
+        // AUTO-BUFF (um cast por sink a cada buffCooldownMs, defasados em
+        // meio-cooldown p/ nao colidir):
+        //  - SELF  (Buff self): tecla da skill -> CLIQUE DIREITO no centro da
+        //    janela (personagem). Diferente do ataque = skill + clique esquerdo.
+        //  - TARGET (Buff target, igual ao healer): cursor no alvo + tecla + Enter.
         // Pula durante interacoes da dungeon para nao baguncar dialogo.
-        if (buffEnabled && !ctx.dungeonBusy && !buffSkills.empty()) {
-            int best = -1; DWORD bestAge = 0;
-            for (size_t i = 0; i < buffSkills.size(); i++) {
-                DWORD age = now - buffSkills[i].lastUsed;
-                if (age < (DWORD)buffCooldownMs) continue;
-                if (best < 0 || age > bestAge) { best = (int)i; bestAge = age; }
-            }
-            if (best >= 0) {
-                HWND gw = ctx.gameWindow;
-                if (gw && !IsIconic(gw)) {
-                    DWORD curPtr = GetCursorPtr(ctx.hProcess);
-                    if (curPtr > 0x1000) {
-                        WriteCursorOnSelf(ctx.hProcess, curPtr, ctx.selfX, ctx.selfY);
-                        SendBuffKey(gw, buffSkills[best].vk);
-                        buffSkills[best].lastUsed = now;
-                        DebugLog("[EXTRA] Auto buff (key %c)", (char)buffSkills[best].vk);
+        if (!buffEnabled) {
+            phaseInit = false;
+        } else if (!ctx.dungeonBusy && !buffSkills.empty()) {
+            HWND gw = ctx.gameWindow;
+            if (gw && !IsIconic(gw)) {
+                if (!phaseInit) {
+                    lastSelfCast = now;
+                    lastTgtCast = buffSelf ? now + (DWORD)buffCooldownMs / 2 : now;
+                    phaseInit = true;
+                }
+
+                // ---- SELF: clique DIREITO na skill (sem selecionar nada) ----
+                if (buffSelf && now - lastSelfCast >= (DWORD)buffCooldownMs) {
+                    int best = PickLru(false, now);
+                    if (best >= 0) {
+                        auto it = slotPos.find(buffSkills[best].vk);
+                        if (it != slotPos.end()) {
+                            // Slot capturado: clica direito em cima do icone
+                            PostGameRightClick(gw, it->second.x, it->second.y);
+                            buffSkills[best].lastSelf = now;
+                            lastSelfCast = now;
+                            DebugLog("[EXTRA] Self buff: right-click skill '%c' at (%d,%d)",
+                                     (char)buffSkills[best].vk, it->second.x, it->second.y);
+                        } else {
+                            // Sem slot: fallback = clique direito no centro (personagem)
+                            RECT rc;
+                            if (GetClientRect(gw, &rc)) {
+                                int cx = (rc.right - rc.left) / 2;
+                                int cy = (rc.bottom - rc.top) / 2;
+                                PostGameRightClick(gw, cx, cy);
+                                buffSkills[best].lastSelf = now;
+                                lastSelfCast = now;
+                                DebugLog("[EXTRA] Self buff: slot da skill '%c' NAO capturado - clique no centro (capture em Buff keys)",
+                                         (char)buffSkills[best].vk);
+                            }
+                        }
+                    }
+                }
+
+                // ---- TARGET: cursor no alvo + tecla + Enter (padrao healer) ----
+                if (!targetName.empty() && now - lastTgtCast >= (DWORD)buffCooldownMs) {
+                    float tx = 0, ty = 0;
+                    bool found = false;
+                    for (auto& p : ctx.players) {
+                        bool match = (targetAddr > 0x1000 && p.objAddr == targetAddr) ||
+                                    (!targetName.empty() && p.name == targetName);
+                        if (!match) continue;
+                        if (p.hp <= 0 || p.maxHp <= 0) { found = false; break; } // morto: nao gasta cast
+                        tx = p.x; ty = p.y; found = true;
+                        targetAddr = p.objAddr;
+                        break;
+                    }
+                    if (found) {
+                        int best = PickLru(true, now);
+                        if (best >= 0) {
+                            DWORD curPtr = GetCursorPtr(ctx.hProcess);
+                            if (curPtr > 0x1000) {
+                                WriteCursorOnSelf(ctx.hProcess, curPtr, tx, ty);
+                                SendBuffKey(gw, buffSkills[best].vk);   // tecla + Enter
+                                buffSkills[best].lastTarget = now;
+                                lastTgtCast = now;
+                                DebugLog("[EXTRA] Buff -> '%S' (key %c)",
+                                         targetName.c_str(), (char)buffSkills[best].vk);
+                            }
+                        }
                     }
                 }
             }
@@ -63,8 +115,29 @@ public:
     bool  buffEnabled = false;
     int   buffCooldownMs = 10000;   // cooldown POR tecla de buff
 
-    struct BuffSkill { int vk = 0; DWORD lastUsed = 0; };
-    std::vector<BuffSkill> buffSkills;   // "5,6,7" -> rotacao LRU
+    struct BuffSkill { int vk = 0; DWORD lastSelf = 0; DWORD lastTarget = 0; };
+    std::vector<BuffSkill> buffSkills;   // "5,6,7" -> rotacao LRU por sink
+
+    bool  buffSelf = true;               // cast em si (clique direito)
+    DWORD targetAddr = 0;                // buff em aliado (igual healer)
+    std::wstring targetName;
+
+    // Posicao capturada do icone da skill no hotbar (client coords do jogo)
+    std::map<int, POINT> slotPos;        // vk -> (x,y)
+    bool HasSlot(int vk) const { return slotPos.find(vk) != slotPos.end(); }
+    void SetSlot(int vk, int x, int y) { slotPos[vk] = POINT{x, y}; }
+    void ClearSlots() { slotPos.clear(); }
+
+    // Tecla ha mais tempo sem uso neste sink (cadencia vem do timer por sink)
+    int PickLru(bool targetSink, DWORD now) const {
+        int best = -1; DWORD bestAge = 0;
+        for (size_t i = 0; i < buffSkills.size(); i++) {
+            DWORD last = targetSink ? buffSkills[i].lastTarget : buffSkills[i].lastSelf;
+            DWORD age = now - last;
+            if (best < 0 || age > bestAge) { best = (int)i; bestAge = age; }
+        }
+        return best;
+    }
 
     // "5, 6, 7" -> lista (qualquer contagem; ordem = ordem da rotacao)
     void SetBuffKeys(const wchar_t* csv) {
@@ -110,6 +183,20 @@ public:
         GetPrivateProfileStringW(L"Extra", L"BuffCooldown", L"10000", buf, 256, path);
         buffCooldownMs = _wtoi(buf);
         if (buffCooldownMs <= 0) buffCooldownMs = 10000;
+        GetPrivateProfileStringW(L"Extra", L"BuffSelf", L"1", buf, 256, path);
+        buffSelf = (buf[0] == L'1');
+        GetPrivateProfileStringW(L"Extra", L"BuffTarget", L"", buf, 256, path);
+        targetName = buf;
+        targetAddr = 0;
+        slotPos.clear();
+        for (auto& s : buffSkills) {
+            wchar_t sk[16]; swprintf_s(sk, L"BuffSlot%c", (wchar_t)s.vk);
+            GetPrivateProfileStringW(L"Extra", sk, L"", buf, 256, path);
+            if (buf[0]) {
+                int x = 0, y = 0;
+                if (swscanf_s(buf, L"%d,%d", &x, &y) == 2) slotPos[s.vk] = POINT{x, y};
+            }
+        }
     }
 
     void SaveConfig(const wchar_t* path) const override {
@@ -124,6 +211,18 @@ public:
         wchar_t buf[16];
         swprintf_s(buf, L"%d", buffCooldownMs);
         WritePrivateProfileStringW(L"Extra", L"BuffCooldown", buf, path);
+        WritePrivateProfileStringW(L"Extra", L"BuffSelf", buffSelf ? L"1" : L"0", path);
+        WritePrivateProfileStringW(L"Extra", L"BuffTarget", targetName.c_str(), path);
+        for (auto& s : buffSkills) {
+            wchar_t sk[16]; swprintf_s(sk, L"BuffSlot%c", (wchar_t)s.vk);
+            auto it = slotPos.find(s.vk);
+            if (it != slotPos.end()) {
+                wchar_t v[32]; swprintf_s(v, L"%d,%d", it->second.x, it->second.y);
+                WritePrivateProfileStringW(L"Extra", sk, v, path);
+            } else {
+                WritePrivateProfileStringW(L"Extra", sk, L"", path);
+            }
+        }
     }
 
     bool HasUI() const override { return true; }
@@ -215,6 +314,9 @@ private:
     HWND hChkAutoRevive = NULL, hChkAutoSell = NULL, hChkAutoRepair = NULL;
     HWND hChkBuff = NULL, hEdtBuffKey = NULL, hEdtBuffCd = NULL;
     DWORD lastTick = 0;
+    DWORD lastSelfCast = 0;
+    DWORD lastTgtCast = 0;
+    bool  phaseInit = false;
 
     static DWORD GetCursorPtr(HANDLE hProc) {
         DWORD gmPtr = 0; SIZE_T r = 0;

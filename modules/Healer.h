@@ -75,6 +75,9 @@ public:
                 }
                 SendGameKey(gw, (WORD)selfHealKey);
                 Sleep(80);
+                // Com 2+ seres no tile o jogo abre "Selecione o alvo" e o Enter
+                // confirmaria a PRIMEIRA linha (pode nao ser voce).
+                PickListEntry(ctx, tileX, tileY, ctx.playerAddr);
                 SendLocalEnter(gw);
                 lastSelfHealTick = now;
             }
@@ -139,6 +142,11 @@ public:
         // 2. Aperta a tecla de heal (default '2')
         SendGameKey(gw, (WORD)healKeyBind);
         Sleep(80);
+
+        // 2b. Com 2+ entidades no tile o jogo abre "Selecione o alvo": sem
+        //     navegacao o Enter sempre confirma a primeira linha. Navega ate o
+        //     jogador de menor HP% do tile (regra do usuario).
+        PickListEntry(ctx, tileX, tileY, LowestHpPlayerOnTile(ctx, tileX, tileY));
 
         // 3. Clica/confirma na posicao (Enter = click do jogo, igual follow/attacker)
         SendLocalEnter(gw);
@@ -297,6 +305,105 @@ public:
     }
 
 private:
+    // ============================================================
+    // Lista "Selecione o alvo" (2+ entidades no mesmo tile)
+    // O jogo mostra a lista e o Enter confirma a LINHA DESTACADA.
+    // 0x072D602C = ponteiro da entidade destacada (dentro da imagem do exe,
+    // base fixa 0x00400000, logo sem ASLR). O jogo reescreve sozinho a cada
+    // tecla — nao da pra setar; so lemos e navegamos com seta pra baixo/cima.
+    // Verificado ao vivo: ↓ passa de Magutop(0x0F2754E8) para
+    // Explurador(0x0F279968) e o campo acompanha.
+    // ============================================================
+    static constexpr DWORD DAT_SelectedTargetEntity = 0x072D602C;
+
+    static DWORD ReadListSelection(HANDLE hProc) {
+        DWORD v = 0; SIZE_T r = 0;
+        ReadProcessMemory(hProc, (LPCVOID)DAT_SelectedTargetEntity, &v, 4, &r);
+        return (r == 4) ? v : 0;
+    }
+
+    static bool SameTile(float x, float y, WORD tileX, WORD tileY) {
+        return (WORD)((int)(x / 24.0f)) == tileX && (WORD)((int)(y / 24.0f)) == tileY;
+    }
+
+    // Tudo que o jogo pode listar no tile (players + mobs + npcs + proprio)
+    static void CollectTileEntities(const GameContext& ctx, WORD tileX, WORD tileY,
+                                    std::vector<DWORD>& out) {
+        auto add = [&](const std::vector<GameContext::EntityInfo>& list) {
+            for (const auto& e : list)
+                if (e.hp > 0 && e.maxHp > 0 && SameTile(e.x, e.y, tileX, tileY))
+                    out.push_back(e.objAddr);
+        };
+        add(ctx.players);
+        add(ctx.mobs);
+        add(ctx.npcs);
+        if (ctx.playerAddr > 0x1000 && ctx.selfHp > 0 && ctx.selfMaxHp > 0 &&
+            SameTile(ctx.selfX, ctx.selfY, tileX, tileY)) {
+            bool has = false;
+            for (DWORD a : out) if (a == ctx.playerAddr) { has = true; break; }
+            if (!has) out.push_back(ctx.playerAddr);
+        }
+    }
+
+    // Regra: cura o jogador de MENOR HP% do tile onde o cursor foi posicionado
+    static DWORD LowestHpPlayerOnTile(const GameContext& ctx, WORD tileX, WORD tileY) {
+        DWORD best = 0;
+        float bestPct = 1.0f;
+        for (const auto& p : ctx.players) {
+            if (p.hp <= 0 || p.maxHp <= 0) continue;
+            if (!SameTile(p.x, p.y, tileX, tileY)) continue;
+            float pct = (float)p.hp / (float)p.maxHp;
+            if (best == 0 || pct < bestPct) { bestPct = pct; best = p.objAddr; }
+        }
+        if (best == 0 && ctx.playerAddr > 0x1000 && ctx.selfHp > 0 && ctx.selfMaxHp > 0 &&
+            SameTile(ctx.selfX, ctx.selfY, tileX, tileY))
+            best = ctx.playerAddr;
+        return best;
+    }
+
+    // Navega a lista aberta ate a selecao == desired. false = nao navegou
+    // (lista fechada / alvo fora da lista) — o chamador cai no Enter antigo.
+    static bool PickListEntry(const GameContext& ctx, WORD tileX, WORD tileY, DWORD desired) {
+        extern void DebugLog(const char* fmt, ...);
+        if (ctx.hProcess == NULL || ctx.gameWindow == NULL || desired == 0) return false;
+
+        std::vector<DWORD> cands;
+        CollectTileEntities(ctx, tileX, tileY, cands);
+        if (cands.size() < 2) return false;   // com 1 entidade nao ha lista
+
+        bool desiredOnTile = false;
+        for (DWORD c : cands) if (c == desired) { desiredOnTile = true; break; }
+        if (!desiredOnTile) return false;     // alvo fora do tile/lista: nada a navegar
+
+        DWORD sel = ReadListSelection(ctx.hProcess);
+        bool onList = false;
+        for (DWORD c : cands) if (c == sel) { onList = true; break; }
+        if (!onList) return false;            // lista (provavelmente) nao abriu
+
+        int steps = (int)cands.size() + 2;
+        if (steps > 12) steps = 12;
+
+        for (int i = 0; i < steps && sel != desired; i++) {
+            PostGameKey(ctx.gameWindow, VK_DOWN, 20);
+            Sleep(40);
+            sel = ReadListSelection(ctx.hProcess);
+        }
+        for (int i = 0; i < steps && sel != desired; i++) {
+            PostGameKey(ctx.gameWindow, VK_UP, 20);
+            Sleep(40);
+            sel = ReadListSelection(ctx.hProcess);
+        }
+
+        if (sel != desired) {
+            DebugLog("[HEAL] Lista: alvo %08X fora do alcance (sel=%08X, %d entradas)",
+                     desired, sel, (int)cands.size());
+            return false;
+        }
+        DebugLog("[HEAL] Lista: selecionado %08X apos navegacao (%d entradas)",
+                 sel, (int)cands.size());
+        return true;
+    }
+
     static DWORD GetCursorPtr(HANDLE hProc) {
         DWORD gmPtr = 0; SIZE_T r = 0;
         ReadProcessMemory(hProc, (LPCVOID)0x00D8F98C, &gmPtr, 4, &r);

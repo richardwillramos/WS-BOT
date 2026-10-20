@@ -23,6 +23,7 @@
 #include "../include/ModuleManager.h"
 #include "../modules/Targeter.h"
 #include "../modules/Attacker.h"
+#include "../modules/Defender.h"
 #include "../modules/Healer.h"
 #include "../modules/Looter.h"
 #include "../modules/Follower.h"
@@ -106,6 +107,7 @@ struct BotState {
     ModuleManager modMgr;
     TargeterModule  targeter;
     AttackerModule  attacker;
+    DefenderModule  defender;
     HealerModule    healer;
     LooterModule    looter;
     FollowerModule  follower;
@@ -177,9 +179,9 @@ static HWND g_hTabPanel[3] = {};
 
 // Config tab - TreeView
 static HWND g_hTree = NULL;
-static const wchar_t* MOD_NAMES[] = { L"Targeter", L"Attacker", L"Healer", L"Follower", L"Looter", L"Extra", L"Dungeon" };
-enum { MID_TARGETER=0, MID_ATTACKER, MID_HEALER, MID_FOLLOWER, MID_LOOTER, MID_EXTRA, MID_DUNGEON };
-static const int MOD_COUNT = 7;
+static const wchar_t* MOD_NAMES[] = { L"Targeter", L"Attacker", L"Defender", L"Healer", L"Follower", L"Looter", L"Extra", L"Dungeon" };
+enum { MID_TARGETER=0, MID_ATTACKER, MID_DEFENDER, MID_HEALER, MID_FOLLOWER, MID_LOOTER, MID_EXTRA, MID_DUNGEON };
+static const int MOD_COUNT = 8;
 
 // Tree item data: which module + which sub-option
 enum TreeItemKind { TREE_PARENT, TREE_TOGGLE, TREE_VALUE, TREE_SELECT };
@@ -187,9 +189,9 @@ struct TreeItemData { int module; TreeItemKind kind; int subId; };
 static std::vector<TreeItemData> g_treeItems;
 
 // Tree item handles per module [module][subItem]
-static HTREEITEM g_hTreeParent[7] = {};
-static HTREEITEM g_hTreeChild[7][10] = {};
-static int g_treeChildCount[7] = {};
+static HTREEITEM g_hTreeParent[8] = {};
+static HTREEITEM g_hTreeChild[8][10] = {};
+static int g_treeChildCount[8] = {};
 
 // Quick actions tab
 static HWND g_hQuickBtn[8] = {};
@@ -303,6 +305,20 @@ void DebugLog(const char* fmt, ...) {
     _vsnprintf(buf, sizeof(buf), fmt, args);
     va_end(args);
     OutputDebugStringA(buf); OutputDebugStringA("\n");
+    // Log em arquivo (bot.log ao lado do exe): a janela de debug nao da pra
+    // ler de fora com facilidade e o arquivo facilita o diagnostico.
+    static FILE* f = NULL;
+    static DWORD t0 = GetTickCount();
+    if (!f) {
+        wchar_t dir[MAX_PATH]; GetModuleFileNameW(NULL, dir, MAX_PATH);
+        wchar_t* bs = wcsrchr(dir, L'\\'); if (bs) *bs = 0;
+        wchar_t full[MAX_PATH]; swprintf_s(full, L"%s\\bot.log", dir);
+        _wfopen_s(&f, full, L"a");
+    }
+    if (f) {
+        fprintf(f, "[%8.1f] %s\n", (GetTickCount() - t0) / 1000.0, buf);
+        fflush(f);
+    }
     if (g_hDebugEdit) {
         int len = GetWindowTextLengthA(g_hDebugEdit);
         SendMessageA(g_hDebugEdit, EM_SETSEL, len, len);
@@ -795,6 +811,17 @@ GameContext BuildContext() {
         ci.objAddr=c.objAddr; ci.name=c.name; ci.x=c.x; ci.y=c.y; ci.distance=c.distance;
         ctx.corpses.push_back(ci);
     }
+
+    // Defender: party = alvos do Healer resolvidos pra endereco agora
+    // (mesmo criterio do Healer::FindEntity: addr, senao nome)
+    for (const auto& t : G->healer.targets) {
+        DWORD a = 0;
+        for (auto& p : G->cachedPlayers) {
+            if ((t.addr > 0x1000 && p.objAddr == t.addr) ||
+                (!t.name.empty() && p.name == t.name)) { a = p.objAddr; break; }
+        }
+        if (a) ctx.partyAddrs.push_back(a);
+    }
     return ctx;
 }
 
@@ -1085,11 +1112,28 @@ void RefreshTree() {
     else swprintf(b,256,L"Skills: %s", keys.c_str());
     TreeSetItemText(MID_ATTACKER, 2, b); }
 
-    TreeSetItemText(MID_HEALER, 0, G->healer.enabled ? L"Status: true" : L"Status: false");
-    if (G->healer.targetName.empty())
-        TreeSetItemText(MID_HEALER, 1, L"Target: (none)");
+    TreeSetItemText(MID_DEFENDER, 0, G->defender.enabled ? L"Status: true" : L"Status: false");
+    swprintf(b,256,L"Max distance: %d tiles", G->defender.maxDistTiles);
+    TreeSetItemText(MID_DEFENDER, 1, b);
+    TreeSetItemText(MID_DEFENDER, 2, G->defender.includeSelf ? L"Defend myself: ON" : L"Defend myself: OFF");
+    if (G->defender.threatName.empty())
+        TreeSetItemText(MID_DEFENDER, 3, L"Threat: (none)");
     else {
-        swprintf(b,256,L"Target: %s", G->healer.targetName.c_str());
+        swprintf(b,256,L"Threat: %.40s", G->defender.threatName.c_str());
+        TreeSetItemText(MID_DEFENDER, 3, b);
+    }
+
+    TreeSetItemText(MID_HEALER, 0, G->healer.enabled ? L"Status: true" : L"Status: false");
+    if (G->healer.targets.empty())
+        TreeSetItemText(MID_HEALER, 1, L"Targets: (none)");
+    else {
+        std::wstring tl;
+        for (size_t i = 0; i < G->healer.targets.size(); i++) {
+            if (i) tl += L", ";
+            tl += G->healer.targets[i].name.empty() ? L"?" : G->healer.targets[i].name;
+        }
+        if (tl.size() > 200) tl = tl.substr(0, 200) + L"...";
+        swprintf(b,256,L"Targets: %s", tl.c_str());
         TreeSetItemText(MID_HEALER, 1, b);
     }
     swprintf(b,256,L"Cooldown: %d ms", G->healer.cooldownMs);
@@ -1189,6 +1233,10 @@ void TreeHandleClick(NMTREEVIEWW* ntv) {
         case MID_ATTACKER:
             if (td.subId == 0) G->attacker.enabled = !G->attacker.enabled;
             break;
+        case MID_DEFENDER:
+            if (td.subId == 0) G->defender.enabled = !G->defender.enabled;
+            else if (td.subId == 2) G->defender.includeSelf = !G->defender.includeSelf;
+            break;
         case MID_HEALER:
             if (td.subId == 0) G->healer.enabled = !G->healer.enabled;
             else if (td.subId == 4) G->healer.healMode = (G->healer.healMode + 1) % 2;
@@ -1249,6 +1297,10 @@ void TreeHandleClick(NMTREEVIEWW* ntv) {
                         (int)G->attacker.skills.size(), buf);
                 }
             }
+            break;
+        case MID_DEFENDER:
+            if (td.subId == 1) { v = ShowInputInt(g_hWnd, L"Max distance (tiles, 0=all)", G->defender.maxDistTiles); G->defender.maxDistTiles = v; }
+            // subId == 3 (Threat) e so display
             break;
         case MID_HEALER:
             if (td.subId == 2) { v = ShowInputInt(g_hWnd, L"Cooldown (ms)", G->healer.cooldownMs); if(v>0) G->healer.cooldownMs = v; }
@@ -1361,25 +1413,31 @@ void TreeHandleClick(NMTREEVIEWW* ntv) {
             RefreshTree();
         }
         else if (td.module == MID_HEALER && td.subId == 1) {
+            // Multi-selecao: clicar em um jogador liga/desliga ele na lista
             std::vector<std::wstring> options;
-            options.push_back(L"(none) - clear target");
-            for (auto& p : G->cachedPlayers) {
+            std::vector<int> idx;   // idx[i] = posicao em cachedPlayers da opcao i+1
+            options.push_back(L"(none) - clear all targets");
+            for (int i = 0; i < (int)G->cachedPlayers.size(); i++) {
+                auto& p = G->cachedPlayers[i];
                 if (p.hp <= 0) continue;
-                wchar_t entry[128];
-                swprintf(entry, 128, L"%s (Lv.%d, HP:%d/%d, %.0fm)", p.name, p.level, p.hp, p.maxHp, p.distance);
+                bool on = G->healer.HasTarget(p.objAddr, p.name);
+                wchar_t entry[160];
+                swprintf(entry, 160, L"%s%s (Lv.%d, HP:%d/%d, %.0fm)",
+                         on ? L"[x] " : L"[ ] ", p.name, p.level, p.hp, p.maxHp, p.distance);
                 options.push_back(entry);
+                idx.push_back(i);
             }
             if (options.size() == 1) {
                 MessageBoxW(g_hWnd, L"No players nearby.", L"Healer", MB_OK|MB_ICONINFORMATION);
                 break;
             }
-            int sel = ShowSelectionList(g_hWnd, L"Select player to heal", L"Pick a target:", options);
+            int sel = ShowSelectionList(g_hWnd, L"Select players to heal",
+                                        L"Pick targets (toggle):", options);
             if (sel == 0) {
-                G->healer.targetName.clear();
-                G->healer.targetAddr = 0;
-            } else if (sel > 0 && sel < (int)G->cachedPlayers.size() + 1) {
-                G->healer.targetName = G->cachedPlayers[sel - 1].name;
-                G->healer.targetAddr = G->cachedPlayers[sel - 1].objAddr;
+                G->healer.targets.clear();
+            } else if (sel > 0 && sel < (int)options.size()) {
+                auto& p = G->cachedPlayers[idx[sel - 1]];
+                G->healer.ToggleTarget(p.objAddr, p.name);
             }
             RefreshTree();
         }
@@ -1507,6 +1565,17 @@ void CreateConfigPanel(HWND parent) {
     g_hTreeChild[MID_ATTACKER][g_treeChildCount[MID_ATTACKER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_ATTACKER], L"Cooldown: 1500 ms", idx); }
     { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_ATTACKER, TREE_VALUE, 2});
     g_hTreeChild[MID_ATTACKER][g_treeChildCount[MID_ATTACKER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_ATTACKER], L"Skills: (click to set)", idx); }
+
+    // Defender (contra-ataca quem bate na party) - logo abaixo do Attacker
+    g_hTreeParent[MID_DEFENDER] = TreeAddItem(g_hTree, TVI_ROOT, MOD_NAMES[MID_DEFENDER], -1);
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_DEFENDER, TREE_TOGGLE, 0});
+    g_hTreeChild[MID_DEFENDER][g_treeChildCount[MID_DEFENDER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_DEFENDER], L"Status: false", idx); }
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_DEFENDER, TREE_VALUE, 1});
+    g_hTreeChild[MID_DEFENDER][g_treeChildCount[MID_DEFENDER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_DEFENDER], L"Max distance: 10", idx); }
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_DEFENDER, TREE_TOGGLE, 2});
+    g_hTreeChild[MID_DEFENDER][g_treeChildCount[MID_DEFENDER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_DEFENDER], L"Defend myself: ON", idx); }
+    { int idx = (int)g_treeItems.size(); g_treeItems.push_back({MID_DEFENDER, TREE_VALUE, 3});
+    g_hTreeChild[MID_DEFENDER][g_treeChildCount[MID_DEFENDER]++] = TreeAddItem(g_hTree, g_hTreeParent[MID_DEFENDER], L"Threat: (none)", idx); }
 
     // Healer
     g_hTreeParent[MID_HEALER] = TreeAddItem(g_hTree, TVI_ROOT, MOD_NAMES[MID_HEALER], -1);
@@ -1840,7 +1909,11 @@ void UpdateUI() {
     }
 
     // Sync AFTER TickAll so Targeter has already updated selectedAddr
-    if (G->targeter.enabled && G->targeter.selectedAddr > 0x1000)
+    // Defender manda primeiro: se tem mob batendo em alguem da party, o
+    // attacker troca pra esse mob em vez do alvo normal do Targeter
+    if (G->defender.enabled && G->defender.threatAddr > 0x1000)
+        G->attacker.targetAddr = G->defender.threatAddr;
+    else if (G->targeter.enabled && G->targeter.selectedAddr > 0x1000)
         G->attacker.targetAddr = G->targeter.selectedAddr;
     else if (G->targeter.enabled)
         G->attacker.targetAddr = 0;
@@ -1890,6 +1963,7 @@ static bool ModuleEnabledByMid(int m) {
     switch (m) {
     case MID_TARGETER: return G->targeter.enabled;
     case MID_ATTACKER: return G->attacker.enabled;
+    case MID_DEFENDER: return G->defender.enabled;
     case MID_HEALER:   return G->healer.enabled;
     case MID_FOLLOWER: return G->follower.enabled;
     case MID_LOOTER:   return G->looter.enabled;
@@ -1979,6 +2053,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         G->modMgr.Add(&G->looter);
         G->modMgr.Add(&G->targeter);
         G->modMgr.Add(&G->attacker);
+        G->modMgr.Add(&G->defender);
         G->modMgr.Add(&G->extra);
 
         wchar_t cfgDir[MAX_PATH];
@@ -2033,6 +2108,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             bool on = !(G->targeter.enabled && G->attacker.enabled && G->healer.enabled && G->looter.enabled);
             G->targeter.enabled = on; G->attacker.enabled = on;
             G->healer.enabled = on; G->looter.enabled = on; G->follower.enabled = on;
+            G->defender.enabled = on;
             SetWindowTextW(g_hStatus, on ? L"ALL ON" : L"ALL OFF");
             break;
         }
@@ -2043,7 +2119,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             G->looter.enabled = false; G->follower.enabled = false;
             G->extra.enabled = false;
             G->dungeon.enabled = false;
-            G->attacker.targetAddr = 0; G->follower.targetAddr = 0; G->healer.targetAddr = 0;
+            G->defender.enabled = false; G->defender.threatAddr = 0; G->defender.threatName.clear();
+            G->attacker.targetAddr = 0; G->follower.targetAddr = 0; G->healer.targets.clear();
             SetWindowTextW(g_hStatus, L"ALL STOPPED");
             DebugLog("[STOP] All modules stopped");
             break;

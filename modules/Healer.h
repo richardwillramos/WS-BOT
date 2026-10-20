@@ -16,6 +16,25 @@ public:
     static constexpr int HEAL_MODE_COOLDOWN = 0; // cura a cada N ms (cooldown)
     static constexpr int HEAL_MODE_HP_BELOW = 1; // cura quando HP% <= limite
 
+    // Alvos de cura (lista: da pra marcar varios jogadores)
+    struct HealTarget { DWORD addr = 0; std::wstring name; };
+    std::vector<HealTarget> targets;
+
+    bool HasTarget(DWORD addr, const std::wstring& name) const {
+        for (const auto& t : targets)
+            if ((addr > 0x1000 && t.addr == addr) || (!name.empty() && t.name == name)) return true;
+        return false;
+    }
+    void ToggleTarget(DWORD addr, const std::wstring& name) {
+        for (size_t i = 0; i < targets.size(); i++) {
+            bool same = (addr > 0x1000 && targets[i].addr == addr) ||
+                        (!name.empty() && !targets[i].name.empty() && targets[i].name == name);
+            if (same) { targets.erase(targets.begin() + i); return; }
+        }
+        targets.push_back({ addr, name });
+    }
+    void ClearTargets() { targets.clear(); }
+
     // True while someone needs a heal RIGHT NOW (HP below the configured %).
     // main.cpp uses this to pause attacker/looter (heal > loot > attack).
     bool NeedsHeal(const GameContext& ctx) const {
@@ -28,14 +47,11 @@ public:
         // Target: only in HP% mode — the periodic mode is not urgent, so it
         // must never hold combat
         if (healMode != HEAL_MODE_HP_BELOW) return false;
-        if (healKeyBind == 0) return false;
-        if (targetAddr <= 0x1000 && targetName.empty()) return false;
-        for (auto& p : ctx.players) {
-            bool match = (targetAddr > 0x1000 && p.objAddr == targetAddr) ||
-                         (!targetName.empty() && p.name == targetName);
-            if (!match) continue;
-            if (p.hp <= 0 || p.maxHp <= 0) return false;  // dead ally never holds combat
-            return (float)p.hp / (float)p.maxHp * 100.0f <= minHpPct;
+        if (healKeyBind == 0 || targets.empty()) return false;
+        for (const auto& t : targets) {
+            const GameContext::EntityInfo* p = FindEntity(ctx, t);
+            if (!p || p->hp <= 0 || p->maxHp <= 0) continue;  // dead ally never holds combat
+            if ((float)p->hp / (float)p->maxHp * 100.0f <= minHpPct) return true;
         }
         return false;
     }
@@ -83,50 +99,34 @@ public:
             }
         }
 
-        // ---- 2) HEAL NO ALVO (prioridade 1 junto com o proprio) ----
-        if (targetAddr <= 0x1000 && targetName.empty()) return;
+        // ---- 2) HEAL NOS ALVOS (vários, prioridade 1 junto com o proprio) ----
+        if (targets.empty()) return;
         if (healKeyBind == 0) return;
 
-        // Acha o alvo na lista de players (por addr, com fallback por nome igual ao follow)
-        float tx = 0, ty = 0, hpPct = 100.0f;
-        bool found = false, dead = false;
-        for (auto& p : ctx.players) {
-            if (p.objAddr == targetAddr) {
-                tx = p.x; ty = p.y; found = true;
-                dead = (p.hp <= 0 || p.maxHp <= 0);
-                if (!dead) hpPct = (float)p.hp / (float)p.maxHp * 100.0f;
-                break;
-            }
-        }
-        if (!found && !targetName.empty()) {
-            for (auto& p : ctx.players) {
-                if (p.name == targetName) {
-                    targetAddr = p.objAddr;
-                    tx = p.x; ty = p.y; found = true;
-                    dead = (p.hp <= 0 || p.maxHp <= 0);
-                    if (!dead) hpPct = (float)p.hp / (float)p.maxHp * 100.0f;
-                    break;
-                }
-            }
-        }
-        if (!found) return;
-        if (dead) return;  // alvo morto: nao desperdicia cast
-
-        // Filtro de cura (igual ao filtro do attacker/targeter):
-        //   HP_BELOW  -> so cura quando HP% <= MinHpPct (mantem sempre acima)
+        // Escolhe o alvo configurado de MENOR HP% (ignora mortos: nao gasta cast).
+        //   HP_BELOW  -> so considera quem esta <= MinHpPct (mantem sempre acima)
         //   COOLDOWN  -> cura a cada N ms do Cooldown, ignorando HP%
-        bool need = (healMode == HEAL_MODE_HP_BELOW) ? (hpPct <= minHpPct) : true;
-        if (!need) return;
+        const GameContext::EntityInfo* best = nullptr;
+        float bestPct = 100.0f;
+        for (const auto& t : targets) {
+            const GameContext::EntityInfo* p = FindEntity(ctx, t);
+            if (!p || p->hp <= 0 || p->maxHp <= 0) continue;
+            float pct = (float)p->hp / (float)p->maxHp * 100.0f;
+            if (healMode == HEAL_MODE_HP_BELOW && pct > minHpPct) continue;
+            if (!best || pct < bestPct) { best = p; bestPct = pct; }
+        }
+        if (!best) return;                       // ninguem precisa agora
         if (now - lastTargetHealTick < (DWORD)cooldownMs) return;
+
+        float tx = best->x, ty = best->y;
+        DebugLog("[HEAL] Healing '%S' HP=%.0f%% (%d targets) at (%.1f,%.1f) key=%c",
+            best->name.c_str(), bestPct, (int)targets.size(), tx, ty, (char)healKeyBind);
 
         // Converte pos do alvo p/ tile (mesmo calculo do follow)
         WORD tileX = (WORD)((int)(tx / 24.0f));
         WORD tileY = (WORD)((int)(ty / 24.0f));
         if (tileX > 27) tileX = 27;
         if (tileY > 27) tileY = 27;
-
-        DebugLog("[HEAL] Healing '%S' HP=%.0f%% at (%.1f,%.1f) tile(%d,%d) key=%c",
-            targetName.c_str(), hpPct, tx, ty, tileX, tileY, (char)healKeyBind);
 
         // 1. Posiciona o cursor na posicao do alvo (igual ao follow)
         DWORD curPtr = GetCursorPtr(ctx.hProcess);
@@ -156,8 +156,6 @@ public:
 
     // Config
     bool  enabled = false;
-    DWORD targetAddr = 0;
-    std::wstring targetName;
     // Heal mode filter (like the targeter filter): HEAL_MODE_* above
     int   healMode = HEAL_MODE_HP_BELOW;
     float minHpPct = 60.0f;
@@ -305,20 +303,105 @@ public:
     }
 
 private:
+    // Alvo configurado -> entidade viva agora (addr primeiro, nome como
+    // fallback: o addr muda quando o jogador recarrega/reloga)
+    static const GameContext::EntityInfo* FindEntity(const GameContext& ctx, const HealTarget& t) {
+        if (t.addr > 0x1000)
+            for (const auto& p : ctx.players)
+                if (p.objAddr == t.addr) return &p;
+        if (!t.name.empty())
+            for (const auto& p : ctx.players)
+                if (p.name == t.name) return &p;
+        return nullptr;
+    }
+
     // ============================================================
     // Lista "Selecione o alvo" (2+ entidades no mesmo tile)
     // O jogo mostra a lista e o Enter confirma a LINHA DESTACADA.
-    // 0x072D602C = ponteiro da entidade destacada (dentro da imagem do exe,
-    // base fixa 0x00400000, logo sem ASLR). O jogo reescreve sozinho a cada
-    // tecla — nao da pra setar; so lemos e navegamos com seta pra baixo/cima.
-    // Verificado ao vivo: ↓ passa de Magutop(0x0F2754E8) para
-    // Explurador(0x0F279968) e o campo acompanha.
+    // O campo fica dentro da imagem (base 0x00400000, sem ASLR), mas o
+    // endereco muda a cada update do jogo — por isso procuramos por
+    // assinatura em vez de hardcodar. O widget comeca em:
+    //   01 00 78 00 | 2F 00 00 00 | <ptr entidade destacada> | FF FF FF FF |
+    //   A8 99 CC 00  (vtable do widget)
+    // e o campo e o <ptr> (+8). O jogo reescreve sozinho a cada tecla —
+    // nao da pra setar; so lemos e navegamos com seta pra baixo/cima.
+    // Verificado ao vivo: build 10432112 B -> campo 0x072CA9A4
+    // (build anterior 11640832 B -> 0x072D602C); ↓ muda a selecao.
+    // Existem 2 widgets identicos no processo; escolhemos o cujo valor
+    // aponta para algo do tile (o outro e outra lista).
     // ============================================================
-    static constexpr DWORD DAT_SelectedTargetEntity = 0x072D602C;
+    // O widget da lista NAO e estatico: e alocado quando "Selecione o alvo"
+    // abre e desalocado depois (mesmos endereços mudam de conteudo). Por isso
+    // o cache so guarda ACERTO — vazio re-scana no proximo heal.
+    static void ScanSelectionFields(HANDLE hProc, std::vector<DWORD>& fields) {
+        extern void DebugLog(const char* fmt, ...);
+        static HANDLE cachedProc = NULL;
+        static std::vector<DWORD> cached;
+        static DWORD cachedTick = 0;
+        static bool wasEmpty = true;
 
-    static DWORD ReadListSelection(HANDLE hProc) {
+        DWORD now = GetTickCount();
+        if (hProc == cachedProc && !cached.empty() && now - cachedTick < 30000) {
+            fields = cached;
+            return;
+        }
+
+        const DWORD imgBase = 0x00400000;
+        const DWORD imgEnd  = 0x00F00000;   // exe de 10-12 MB
+        const DWORD chunk   = 0x10000;
+        std::vector<BYTE> buf(chunk);
+
+        auto scanOnce = [&](bool strict) {
+            for (DWORD addr = imgBase; addr < imgEnd; ) {
+                SIZE_T got = 0;
+                if (!ReadProcessMemory(hProc, (LPCVOID)addr, buf.data(), chunk, &got) || got < 20) {
+                    addr += 0x1000;   // regiao ilegivel: pula pagina
+                    continue;
+                }
+                for (DWORD i = 0; i + 20 <= (DWORD)got; i++) {
+                    const BYTE* p = &buf[i];
+                    if (p[0]==0x01 && p[1]==0x00 && p[2]==0x78 && p[3]==0x00 &&
+                        p[4]==0x2F && p[5]==0x00 && p[6]==0x00 && p[7]==0x00) {
+                        // Strict: cabecalho + FFFFFFFF + vtable 0x00CC99A8.
+                        // Relaxado: so o cabecalho (os 8 bytes finais podem ser
+                        // estado transitorio); o probe da seta valida de verdade.
+                        if (strict &&
+                            !(p[12]==0xFF && p[13]==0xFF && p[14]==0xFF && p[15]==0xFF &&
+                              p[16]==0xA8 && p[17]==0x99 && p[18]==0xCC && p[19]==0x00))
+                            continue;
+                        DWORD f = addr + i + 8;
+                        bool dup = false;
+                        for (DWORD h : cached) if (h == f) { dup = true; break; }
+                        if (!dup) cached.push_back(f);
+                    }
+                }
+                DWORD next = addr + (DWORD)got - 19;   // re-le os 19 bytes finais
+                if (next <= addr) break;
+                addr = next;
+            }
+        };
+
+        cachedProc = hProc;
+        cached.clear();
+        scanOnce(true);
+        if (cached.empty())
+            scanOnce(false);            // relaxado: so o cabecalho 01 00 78 00 2F 00 00 00
+        cachedTick = now;
+        fields = cached;
+
+        if (cached.empty() != wasEmpty) {   // loga so quando o estado muda
+            if (!cached.empty())
+                DebugLog("[HEAL] scan: %d widget(s), campo=0x%08X",
+                         (int)cached.size(), cached[0]);
+            else
+                DebugLog("[HEAL] scan: nenhum widget (lista fechada)");
+            wasEmpty = cached.empty();
+        }
+    }
+
+    static DWORD ReadListSelection(HANDLE hProc, DWORD field) {
         DWORD v = 0; SIZE_T r = 0;
-        ReadProcessMemory(hProc, (LPCVOID)DAT_SelectedTargetEntity, &v, 4, &r);
+        ReadProcessMemory(hProc, (LPCVOID)field, &v, 4, &r);
         return (r == 4) ? v : 0;
     }
 
@@ -361,6 +444,21 @@ private:
         return best;
     }
 
+    static bool InSet(const std::vector<DWORD>& v, DWORD a) {
+        for (DWORD c : v) if (c == a) return true;
+        return false;
+    }
+
+    // Espera a selecao mudar (o PostMessage e async); devolve o novo valor
+    static DWORD WaitForSelectionChange(HANDLE hProc, DWORD field, DWORD before) {
+        for (int k = 0; k < 8; k++) {
+            Sleep(20);
+            DWORD v = ReadListSelection(hProc, field);
+            if (v != before) return v;
+        }
+        return before;
+    }
+
     // Navega a lista aberta ate a selecao == desired. false = nao navegou
     // (lista fechada / alvo fora da lista) — o chamador cai no Enter antigo.
     static bool PickListEntry(const GameContext& ctx, WORD tileX, WORD tileY, DWORD desired) {
@@ -369,38 +467,85 @@ private:
 
         std::vector<DWORD> cands;
         CollectTileEntities(ctx, tileX, tileY, cands);
-        if (cands.size() < 2) return false;   // com 1 entidade nao ha lista
+        if (cands.size() < 2) {            // com 1 entidade nao ha lista
+            DebugLog("[HEAL] Lista: so %d entidade no tile (%08X,%08X)",
+                     (int)cands.size(), tileX, tileY);
+            return false;
+        }
+        if (!InSet(cands, desired)) {
+            DebugLog("[HEAL] Lista: alvo %08X fora do tile (%d entidades)",
+                     desired, (int)cands.size());
+            return false;
+        }
 
-        bool desiredOnTile = false;
-        for (DWORD c : cands) if (c == desired) { desiredOnTile = true; break; }
-        if (!desiredOnTile) return false;     // alvo fora do tile/lista: nada a navegar
+        // Ha 2 widgets identicos no processo. O VALOR nao serve pra escolher:
+        // o outro guarda o proprio jogador, que tambem esta no tile. A unica
+        // prova e mexer: aperta uma seta e ve qual dos campos muda.
+        std::vector<DWORD> fields;
+        ScanSelectionFields(ctx.hProcess, fields);
+        if (fields.empty()) {
+            // O widget so existe com a lista ABERTA; se a lista demorou mais
+            // que 80ms pra abrir, re-scan mais pra frente acha ela.
+            Sleep(120);
+            ScanSelectionFields(ctx.hProcess, fields);
+        }
+        if (fields.empty()) {
+            DebugLog("[HEAL] Lista: campo de selecao nao encontrado (widget alocado so com lista aberta)");
+            return false;
+        }
+        int nf = (int)fields.size();
+        if (nf > 8) nf = 8;
+        DWORD pre[8], post[8];
+        for (int i = 0; i < nf; i++) pre[i] = ReadListSelection(ctx.hProcess, fields[i]);
 
-        DWORD sel = ReadListSelection(ctx.hProcess);
-        bool onList = false;
-        for (DWORD c : cands) if (c == sel) { onList = true; break; }
-        if (!onList) return false;            // lista (provavelmente) nao abriu
+        // Probe (o caller ja dormiu 80ms apos a tecla de skill, entao a lista,
+        // se foi abrir, ja esta aberta)
+        PostGameKey(ctx.gameWindow, VK_DOWN, 20);
+        Sleep(60);
+        int changed = -1;
+        for (int i = 0; i < nf; i++) {
+            post[i] = ReadListSelection(ctx.hProcess, fields[i]);
+            if (post[i] != pre[i] && changed < 0) changed = i;
+        }
+        if (changed < 0) {
+            DebugLog("[HEAL] Lista: seta nao mexeu nada (sem lista), %d widgets, sel=%08X",
+                     nf, pre[0]);
+            return false;   // nao ha lista (skill em cooldown etc.)
+        }
+        DWORD field = fields[changed];
+        DWORD start = pre[changed];
+        DWORD sel   = post[changed];
+        DebugLog("[HEAL] Lista: campo=%08X start=%08X sel=%08X (%d widgets, %d entidades)",
+                 field, start, sel, nf, (int)cands.size());
 
         int steps = (int)cands.size() + 2;
         if (steps > 12) steps = 12;
 
+        // O probe ja provou que a lista responde; aqui so vai ate o desired
+        // (o probe ja andou 1 passo, entao se desired for o inicio a volta
+        // com seta cima la embaixo resolve)
         for (int i = 0; i < steps && sel != desired; i++) {
+            DWORD before = sel;
             PostGameKey(ctx.gameWindow, VK_DOWN, 20);
-            Sleep(40);
-            sel = ReadListSelection(ctx.hProcess);
+            sel = WaitForSelectionChange(ctx.hProcess, field, before);
+            if (sel == before) break;   // fim da lista (pode nao dar a volta)
         }
-        for (int i = 0; i < steps && sel != desired; i++) {
-            PostGameKey(ctx.gameWindow, VK_UP, 20);
-            Sleep(40);
-            sel = ReadListSelection(ctx.hProcess);
+        if (sel != desired) {           // lista pode nao dar a volta: tenta cima
+            for (int i = 0; i < steps && sel != desired; i++) {
+                DWORD before = sel;
+                PostGameKey(ctx.gameWindow, VK_UP, 20);
+                sel = WaitForSelectionChange(ctx.hProcess, field, before);
+                if (sel == before) break;
+            }
         }
 
         if (sel != desired) {
-            DebugLog("[HEAL] Lista: alvo %08X fora do alcance (sel=%08X, %d entradas)",
-                     desired, sel, (int)cands.size());
+            DebugLog("[HEAL] Lista: falhou (start=%08X sel=%08X want=%08X, %d entidades)",
+                     start, sel, desired, (int)cands.size());
             return false;
         }
-        DebugLog("[HEAL] Lista: selecionado %08X apos navegacao (%d entradas)",
-                 sel, (int)cands.size());
+        DebugLog("[HEAL] Lista: selecionado %08X (campo=%08X, start=%08X, %d entradas)",
+                 sel, field, start, (int)cands.size());
         return true;
     }
 

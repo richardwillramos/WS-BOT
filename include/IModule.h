@@ -13,6 +13,9 @@ struct GameContext {
     std::wstring selfName;
     struct EntityInfo { DWORD objAddr; std::wstring name; float x, y; int hp, maxHp; float distance; int type; };
     std::vector<EntityInfo> players, mobs, npcs;
+    // Defender: enderecos dos membros da party (mesmos alvos do Healer,
+    // resolvidos no BuildContext) — o Defender contra-ataca quem bate neles
+    std::vector<DWORD> partyAddrs;
     struct CorpseInfo { DWORD objAddr; std::wstring name; float x, y; float distance; };
     std::vector<CorpseInfo> corpses;
     DWORD playerAddr, gmAddr;

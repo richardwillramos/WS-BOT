@@ -11,8 +11,8 @@ public:
     bool IsEnabled() const override { return enabled; }
     void SetEnabled(bool e) override { enabled = e; }
 
-    void Start() override { lastTick = 0; phaseInit = false; }
-    void Stop() override  { lastTick = 0; phaseInit = false; }
+    void Start() override { lastTick = 0; phaseInit = false; lastRepairCheck = 0; lastRepairUse = 0; }
+    void Stop() override  { lastTick = 0; phaseInit = false; lastRepairCheck = 0; lastRepairUse = 0; }
 
     void Tick(const GameContext& ctx) override {
         extern void DebugLog(const char* fmt, ...);
@@ -91,6 +91,24 @@ public:
                                          targetName.c_str(), (char)buffSkills[best].vk);
                             }
                         }
+                    }
+                }
+            }
+        }
+
+        if (autoRepair && ctx.gameWindow && !IsIconic(ctx.gameWindow) &&
+            now - lastRepairCheck >= 2000) {
+            lastRepairCheck = now;
+            if (now - lastRepairUse >= 30000) {
+                HDC dc = GetDC(ctx.gameWindow);
+                if (dc) {
+                    int c = GetPixel(dc, 650, 465);
+                    ReleaseDC(ctx.gameWindow, dc);
+                    int rr = c & 0xFF, gg = (c >> 8) & 0xFF, bb = (c >> 16) & 0xFF;
+                    if (c != CLR_INVALID && bb < 100 && (rr > 150 || gg > 150)) {
+                        PostGameKey(ctx.gameWindow, (UINT)repairKey, 50);
+                        lastRepairUse = now;
+                        DebugLog("[EXTRA] Auto repair: item quebrado detectado -> tecla %c", (char)repairKey);
                     }
                 }
             }
@@ -316,6 +334,9 @@ private:
     DWORD lastTick = 0;
     DWORD lastSelfCast = 0;
     DWORD lastTgtCast = 0;
+    DWORD lastRepairCheck = 0;
+    DWORD lastRepairUse = 0;
+    int   repairKey = 'Q';
     bool  phaseInit = false;
 
     static DWORD GetCursorPtr(HANDLE hProc) {

@@ -1,0 +1,61 @@
+[     0.0] [NPC] Loaded 36 names from F:\WS\Warspear-Follow-Bot\WS-BOT\controller\config\npc_names.json
+[     0.0] [BOSS] no names parsed in F:\WS\Warspear-Follow-Bot\WS-BOT\controller\config\boss_names.json - keeping current list
+[   153.7] === Bot Debug Console Started ===
+[   153.7] PID: 11204
+[   153.7] [CONNECT] SUCCESS - Zox Lv.248
+[   153.7] [NPC] Loaded 36 names from F:\WS\Warspear-Follow-Bot\WS-BOT\controller\config\npc_names.json
+[   153.7] [BOSS] no names parsed in F:\WS\Warspear-Follow-Bot\WS-BOT\controller\config\boss_names.json - keeping current list
+[   153.7] [TARGETER] Selected: Cascavel-vermelha (addr=0x0E23E2D8 dist=0.0)
+[   153.7] [ATTACK] Target:  addr=0x0E23E2D8 game(204.0,420.0) tile(8,17)
+[   153.7] [STATS] ====================================
+[   154.1] [STATS] Position: (12.0, 372.0) | Mobs: 8 | Players: 1
+[   154.1] [STATS] Target: 0x0E23E2D8 | Follower: 0x0DF1C6F8
+[   154.1] [STATS] Corpses: 0 | Loots: 0
+[   154.1] [STATS] Modules: T=1 A=1 H=1 F=0 L=1
+[   154.1] [STATS] ====================================
+[   154.1] [ATTACK] Sword detected! action=8, sending Enter
+[   154.7] [ATTACK] Target:  addr=0x0E23E2D8 game(204.0,420.0) tile(8,17)
+[   154.9] [ATTACK] Sword detected! action=8, sending Enter
+[   155.5] [ATTACK] Target:  addr=0x0E23E2D8 game(204.0,420.0) tile(8,17)
+[   155.7] [ATTACK] Sword detected! action=8, sending Enter
+[   156.3] [ATTACK] Target:  addr=0x0E23E2D8 game(204.0,420.0) tile(8,17)
+[   156.5] [ATTACK] Sword detected! action=8, sending Enter
+[   157.1] [ATTACK] Target:  addr=0x0E23E2D8 game(204.0,420.0) tile(8,17)
+[   157.3] [ATTACK] Sword detected! action=8, sending Enter
+[   158.0] [ATTACK] Target:  addr=0x0E23E2D8 game(198.0,420.0) tile(8,17)
+[   158.2] [ATTACK] Sword detected! action=8, sending Enter
+[   158.8] [ATTACK] Target:  addr=0x0E23E2D8 game(180.0,420.0) tile(7,17)
+[   159.0] [ATTACK] Sword detected! action=8, sending Enter
+[   159.6] [ATTACK] Target:  addr=0x0E23E2D8 game(180.0,420.0) tile(7,17)
+[   159.8] [ATTACK] Sword detected! action=8, sending Enter
+[   160.4] [ATTACK] Target:  addr=0x0E23E2D8 game(180.0,420.0) tile(7,17)
+[   160.6] [ATTACK] Sword detected! action=8, sending Enter
+[   161.2] [ATTACK] Target:  addr=0x0E23E2D8 game(180.0,420.0) tile(7,17)
+[   161.4] [ATTACK] Sword detected! action=8, sending Enter
+[   162.0] [ATTACK] Target:  addr=0x0E23E2D8 game(180.0,420.0) tile(7,17)
+[   162.2] [ATTACK] Sword detected! action=8, sending Enter
+[   162.8] [ATTACK] Target:  addr=0x0E23E2D8 game(180.0,420.0) tile(7,17)
+[   163.0] [ATTACK] Sword detected! action=8, sending Enter
+[   163.3] [EXIT] Shutting down...
+[     0.0] [NPC] Loaded 36 names from F:\WS\Warspear-Follow-Bot\WS-BOT\controller\config\npc_names.json
+[     0.0] [BOSS] no names parsed in F:\WS\Warspear-Follow-Bot\WS-BOT\controller\config\boss_names.json - keeping current list
+[   199.8] === Bot Debug Console Started ===
+[   199.8] PID: 11204
+[   199.9] [CONNECT] SUCCESS - Zox Lv.160
+[   199.9] [NPC] Loaded 36 names from F:\WS\Warspear-Follow-Bot\WS-BOT\controller\config\npc_names.json
+[   199.9] [BOSS] no names parsed in F:\WS\Warspear-Follow-Bot\WS-BOT\controller\config\boss_names.json - keeping current list
+[   199.9] [ATTACK] Target:  addr=0x0E23EA28 game(146.0,444.0) tile(6,18)
+[   199.9] [STATS] ====================================
+[   199.9] [STATS] Position: (180.0, 420.0) | Mobs: 8 | Players: 1
+[   199.9] [STATS] Target: 0x0E23EA28 | Follower: 0x0C100AA0
+[   199.9] [STATS] Corpses: 0 | Loots: 0
+[   199.9] [STATS] Modules: T=0 A=1 H=1 F=0 L=1
+[   199.9] [STATS] ====================================
+[   200.1] [ATTACK] Sword detected! action=8, sending Enter
+[   200.7] [ATTACK] Target:  addr=0x0E23EA28 game(156.0,439.0) tile(6,18)
+[   201.0] [ATTACK] Sword detected! action=8, sending Enter
+[   201.7] [ATTACK] Target:  addr=0x0E23EA28 game(156.0,420.0) tile(6,17)
+[   201.9] [ATTACK] Sword detected! action=8, sending Enter
+[   202.5] [ATTACK] Target:  addr=0x0E23EA28 game(156.0,420.0) tile(6,17)
+[   202.8] [ATTACK] Sword detected! action=8, sending Enter
+[   203.0] [EXIT] Shutting down...

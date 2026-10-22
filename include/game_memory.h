@@ -12,16 +12,16 @@
 namespace Game {
 
 // ---- Key addresses ----
-constexpr DWORD DAT_GetGlobalSystemInstance = 0x00D8F98C;  // read pointer from here → system instance
+constexpr DWORD DAT_GetGlobalSystemInstance = 0x00DA09AC;  // read pointer from here → system instance
 constexpr DWORD OFFSET_GameManager         = 0x14;        // system + 0x14 = gameManager
 constexpr DWORD OFFSET_EntityTreeHeader    = 0x3C;        // gameManager + 0x3C = entity tree header
 constexpr DWORD OFFSET_LocalPlayer         = 0x40;        // gameManager + 0x40 = localPlayer ptr
-constexpr DWORD OFFSET_CursorPtr           = 0x1244;      // gameManager + 0x1244 = cursor object
+constexpr DWORD OFFSET_CursorPtr           = 0x124C;      // gameManager + 0x124C = cursor object
 
 // ---- VTable IDs ----
-constexpr DWORD VTABLE_LOCAL_PLAYER = 0x00CD12D0;
-constexpr DWORD VTABLE_HUMANOID     = 0x00CD16BC;  // players, NPCs, humanoid mobs
-constexpr DWORD VTABLE_BEAST        = 0x00CD17B4;  // animal mobs (Javali, Boneca, etc.)
+constexpr DWORD VTABLE_LOCAL_PLAYER = 0x00CE16C0;
+constexpr DWORD VTABLE_HUMANOID     = 0x00CE1AB4;  // players, NPCs, humanoid mobs
+constexpr DWORD VTABLE_BEAST        = 0x00CE1BA0;  // animal mobs (Javali, Boneca, etc.)
 
 // ---- Function addresses ----
 // STALE after game update: not found yet. Do NOT call (see README).

@@ -41,7 +41,7 @@ void Log(const char* msg) {
 template<typename T> T GR(DWORD a) { T v{}; __try { v = *(T*)a; } __except(EXCEPTION_EXECUTE_HANDLER){} return v; }
 template<typename T> void GW(DWORD a, T v) { __try { *(T*)a = v; } __except(EXCEPTION_EXECUTE_HANDLER){} }
 
-DWORD GetSys() { return GR<DWORD>(0x00D8F98C); }
+DWORD GetSys() { return GR<DWORD>(0x00DA09AC); }
 DWORD GetGM(DWORD s) { return (s > 0x1000) ? GR<DWORD>(s + 0x14) : 0; }
 DWORD GetLP(DWORD g) { return (g > 0x1000) ? GR<DWORD>(g + 0x40) : 0; }
 
@@ -51,7 +51,7 @@ DWORD GetLP(DWORD g) { return (g > 0x1000) ? GR<DWORD>(g + 0x40) : 0; }
 DWORD GetCursorPtr() {
     DWORD gm = GetGM(GetSys());
     if (gm == 0) return 0;
-    return GR<DWORD>(gm + 0x1244);
+    return GR<DWORD>(gm + 0x124C);
 }
 
 short ReadCursorX() {

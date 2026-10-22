@@ -34,7 +34,7 @@
 // Game constants
 // ============================================================
 namespace Game {
-    constexpr DWORD GM_PTR      = 0x00D8F98C;
+    constexpr DWORD GM_PTR      = 0x00DA09AC;
     constexpr DWORD GM_OFFSET   = 0x14;
     constexpr DWORD LP_OFFSET   = 0x40;
     constexpr DWORD ENTITY_TREE = 0x3C;
@@ -55,12 +55,12 @@ namespace Game {
     constexpr DWORD ENT_MAX_MANA  = 0x11C;
     constexpr DWORD ENT_LEVEL     = 0x2E4;
     constexpr DWORD ENT_CLASS_IND = 0x3F9;
-    constexpr DWORD VT_PLAYER  = 0x00CD12D0;
-    constexpr DWORD VT_BEAST   = 0x00CD17B4;
+    constexpr DWORD VT_PLAYER  = 0x00CE16C0;
+    constexpr DWORD VT_BEAST   = 0x00CE1BA0;
     constexpr DWORD VT_CORPSE  = 0x00000000;   // unknown after update (unused)
     constexpr DWORD OBJ_OBJECT_ID  = 0x120;
     constexpr DWORD OBJ_TYPE_ID    = 0x124;
-    constexpr DWORD CURSOR_OFFSET  = 0x1244;
+    constexpr DWORD CURSOR_OFFSET  = 0x124C;
     constexpr DWORD CUR_X          = 0x08;
     constexpr DWORD CUR_Y          = 0x0A;
     constexpr DWORD CUR_RAW_X      = 0x10;
@@ -1861,8 +1861,8 @@ void UpdateUI() {
     // Atualiza tambem quando o gold muda (loot), nao so no nome.
     static std::wstring lastTitle;
     wchar_t wtitle[160];
-    swprintf(wtitle, 160, L"%s [Lv.%d %s] | Gold: %d", name.c_str(), level,
-        GetClassName(classId), ReadGold(gmAddr));
+    swprintf(wtitle, 160, L"%s [Lv.%d] | Gold: %d", name.c_str(), level,
+        ReadGold(gmAddr));
     if (lastTitle != wtitle) {
         SetWindowTextW(g_hWnd, wtitle);
         lastTitle = wtitle;

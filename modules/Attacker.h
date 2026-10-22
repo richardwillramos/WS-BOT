@@ -315,9 +315,9 @@ private:
     std::wstring targetName;
     float targetGX = 0, targetGY = 0;
 
-    static constexpr DWORD GM_PTR_OFFSET        = 0x00D8F98C;
+    static constexpr DWORD GM_PTR_OFFSET        = 0x00DA09AC;
     static constexpr DWORD GM_OFFSET            = 0x14;
-    static constexpr DWORD CURSOR_OFFSET        = 0x1244;
+    static constexpr DWORD CURSOR_OFFSET        = 0x124C;
     static constexpr DWORD CUR_X_OFFSET         = 0x08;
     static constexpr DWORD CUR_Y_OFFSET         = 0x0A;
     static constexpr DWORD CUR_RAW_X_OFFSET     = 0x10;

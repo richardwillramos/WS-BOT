@@ -551,13 +551,13 @@ private:
 
     static DWORD GetCursorPtr(HANDLE hProc) {
         DWORD gmPtr = 0; SIZE_T r = 0;
-        ReadProcessMemory(hProc, (LPCVOID)0x00D8F98C, &gmPtr, 4, &r);
+        ReadProcessMemory(hProc, (LPCVOID)0x00DA09AC, &gmPtr, 4, &r);
         if (r != 4 || gmPtr <= 0x1000) return 0;
         DWORD gm = 0;
         ReadProcessMemory(hProc, (LPCVOID)(gmPtr + 0x14), &gm, 4, &r);
         if (r != 4 || gm <= 0x1000) return 0;
         DWORD cur = 0;
-        ReadProcessMemory(hProc, (LPCVOID)(gm + 0x1244), &cur, 4, &r);
+        ReadProcessMemory(hProc, (LPCVOID)(gm + 0x124C), &cur, 4, &r);
         return (r == 4) ? cur : 0;
     }
 

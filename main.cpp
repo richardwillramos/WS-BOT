@@ -53,7 +53,7 @@ namespace Game {
     constexpr DWORD ENT_MAX_HP    = 0x114;
     constexpr DWORD ENT_MANA      = 0x118;
     constexpr DWORD ENT_MAX_MANA  = 0x11C;
-    constexpr DWORD ENT_LEVEL     = 0x2E4;
+    constexpr DWORD ENT_LEVEL     = 0x2F0;
     constexpr DWORD ENT_CLASS_IND = 0x405;
     constexpr DWORD VT_PLAYER  = 0x00CE16C0;
     constexpr DWORD VT_BEAST   = 0x00CE1BA0;

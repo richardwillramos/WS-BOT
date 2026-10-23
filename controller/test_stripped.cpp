@@ -28,7 +28,7 @@ namespace Game {
     constexpr DWORD ENT_VTABLE=0x00, ENT_RAW_X=0x10, ENT_RAW_Y=0x14;
     constexpr DWORD ENT_NAME_PTR=0x58, ENT_NAME_LEN=0x60, ENT_TYPE_IND=0x090;
     constexpr DWORD ENT_HP=0x110, ENT_MAX_HP=0x114, ENT_MANA=0x118, ENT_MAX_MANA=0x11C;
-    constexpr DWORD ENT_LEVEL=0x2E4, ENT_CLASS_IND=0x3F9;
+    constexpr DWORD ENT_LEVEL=0x2F0, ENT_CLASS_IND=0x405;
     constexpr DWORD VT_PLAYER=0x00CD12D0, VT_BEAST=0x00CD17B4, VT_CORPSE=0;
     constexpr DWORD OBJ_OBJECT_ID=0x120, OBJ_TYPE_ID=0x124;
     constexpr DWORD CURSOR_OFFSET=0x1244, CUR_X=0x08, CUR_Y=0x0A;
@@ -102,7 +102,7 @@ void TraverseTree(DWORD node,std::vector<EntityData>& entities,std::vector<Corps
     EntityData e{};e.objAddr=objPtr;DWORD np=Read<DWORD>(objPtr+Game::ENT_NAME_PTR);int nl=Read<int>(objPtr+Game::ENT_NAME_LEN);if(nl>0&&nl<64&&np>0x1000){wchar_t w[64]={};for(int i=0;i<nl;i++){wchar_t c=Read<wchar_t>(np+i*2);if(c==0)break;w[i]=c;}wcscpy_s(e.name,w);}else wcscpy_s(e.name,L"(unknown)");
     e.x=Read<int>(objPtr+Game::ENT_RAW_X)/65536.0f;e.y=Read<int>(objPtr+Game::ENT_RAW_Y)/65536.0f;e.hp=Read<int>(objPtr+Game::ENT_HP);e.maxHp=Read<int>(objPtr+Game::ENT_MAX_HP);e.mana=Read<int>(objPtr+Game::ENT_MANA);e.maxMana=Read<int>(objPtr+Game::ENT_MAX_MANA);int ti=Read<int>(objPtr+Game::ENT_TYPE_IND);
     if(vtable==Game::VT_PLAYER||ti==1)e.type=1;else if(vtable==Game::VT_BEAST)e.type=4;else if(IsNPC(e.name))e.type=3;else e.type=2;
-    e.level=Read<int>(objPtr+Game::ENT_LEVEL);e.classId=Read<BYTE>(objPtr+Game::ENT_CLASS_IND);e.distance=CalcDist(selfX,selfY,e.x,e.y);if(e.hp==0&&e.maxHp==0)return;entities.push_back(e);
+    e.level=Read<BYTE>(objPtr+Game::ENT_LEVEL);e.classId=Read<BYTE>(objPtr+Game::ENT_CLASS_IND);e.distance=CalcDist(selfX,selfY,e.x,e.y);if(e.hp==0&&e.maxHp==0)return;entities.push_back(e);
 }
 
 bool ReadGameState(float& sx,float& sy,int& hp,int& mhp,int& mn,int& mmn,std::wstring& name,int& level,int& classId,std::vector<EntityData>& pl,std::vector<EntityData>& mb,std::vector<EntityData>& np,std::vector<CorpseData>& corpses,DWORD* outPA=nullptr,DWORD* outGM=nullptr){
@@ -114,7 +114,7 @@ bool ReadGameState(float& sx,float& sy,int& hp,int& mhp,int& mn,int& mmn,std::ws
     if(outPA)*outPA=lp;
     sx=Read<int>(lp+Game::ENT_RAW_X)/65536.0f;sy=Read<int>(lp+Game::ENT_RAW_Y)/65536.0f;
     hp=Read<int>(lp+Game::ENT_HP);mhp=Read<int>(lp+Game::ENT_MAX_HP);mn=Read<int>(lp+Game::ENT_MANA);mmn=Read<int>(lp+Game::ENT_MAX_MANA);
-    level=Read<int>(lp+Game::ENT_LEVEL);classId=Read<BYTE>(lp+Game::ENT_CLASS_IND);
+    level=Read<BYTE>(lp+Game::ENT_LEVEL);classId=Read<BYTE>(lp+Game::ENT_CLASS_IND);
     DWORD np2=Read<DWORD>(lp+Game::ENT_NAME_PTR);int nl=Read<int>(lp+Game::ENT_NAME_LEN);
     if(nl>0&&nl<64&&np2>0x1000){wchar_t w[64]={};for(int i=0;i<nl;i++){wchar_t c=Read<wchar_t>(np2+i*2);if(c==0)break;w[i]=c;}name=w;}else name=L"(unknown)";
     DWORD th=Read<DWORD>(gm+Game::ENTITY_TREE);if(th<=0x1000)return false;
@@ -128,7 +128,7 @@ bool ReadGameState(float& sx,float& sy,int& hp,int& mhp,int& mn,int& mmn,std::ws
 
 GameContext BuildContext(){
     GameContext ctx{};ctx.hProcess=g_hProcess;ctx.gamePid=g_gamePid;ctx.selfX=g_selfX;ctx.selfY=g_selfY;ctx.playerAddr=g_playerAddr;ctx.gmAddr=g_gmAddr;ctx.gameWindow=FindGameWindow();ctx.tickCount=GetTickCount();
-    if(g_playerAddr>0x1000){ctx.selfHp=Read<int>(g_playerAddr+Game::ENT_HP);ctx.selfMaxHp=Read<int>(g_playerAddr+Game::ENT_MAX_HP);ctx.selfMana=Read<int>(g_playerAddr+Game::ENT_MANA);ctx.selfMaxMana=Read<int>(g_playerAddr+Game::ENT_MAX_MANA);ctx.selfLevel=Read<int>(g_playerAddr+Game::ENT_LEVEL);ctx.selfClassId=Read<BYTE>(g_playerAddr+Game::ENT_CLASS_IND);DWORD np=Read<DWORD>(g_playerAddr+Game::ENT_NAME_PTR);int nl=Read<int>(g_playerAddr+Game::ENT_NAME_LEN);if(nl>0&&nl<64&&np>0x1000){wchar_t w[64]={};for(int i=0;i<nl;i++){wchar_t c=Read<wchar_t>(np+i*2);if(c==0)break;w[i]=c;}ctx.selfName=w;}}
+    if(g_playerAddr>0x1000){ctx.selfHp=Read<int>(g_playerAddr+Game::ENT_HP);ctx.selfMaxHp=Read<int>(g_playerAddr+Game::ENT_MAX_HP);ctx.selfMana=Read<int>(g_playerAddr+Game::ENT_MANA);ctx.selfMaxMana=Read<int>(g_playerAddr+Game::ENT_MAX_MANA);ctx.selfLevel=Read<BYTE>(g_playerAddr+Game::ENT_LEVEL);ctx.selfClassId=Read<BYTE>(g_playerAddr+Game::ENT_CLASS_IND);DWORD np=Read<DWORD>(g_playerAddr+Game::ENT_NAME_PTR);int nl=Read<int>(g_playerAddr+Game::ENT_NAME_LEN);if(nl>0&&nl<64&&np>0x1000){wchar_t w[64]={};for(int i=0;i<nl;i++){wchar_t c=Read<wchar_t>(np+i*2);if(c==0)break;w[i]=c;}ctx.selfName=w;}}
     for(auto&e:G->cachedPlayers){GameContext::EntityInfo ei;ei.objAddr=e.objAddr;ei.name=e.name;ei.x=e.x;ei.y=e.y;ei.hp=e.hp;ei.maxHp=e.maxHp;ei.distance=e.distance;ei.type=e.type;ctx.players.push_back(ei);}
     for(auto&e:G->cachedMobs){GameContext::EntityInfo ei;ei.objAddr=e.objAddr;ei.name=e.name;ei.x=e.x;ei.y=e.y;ei.hp=e.hp;ei.maxHp=e.maxHp;ei.distance=e.distance;ei.type=e.type;ctx.mobs.push_back(ei);}
     for(auto&e:G->cachedNpcs){GameContext::EntityInfo ei;ei.objAddr=e.objAddr;ei.name=e.name;ei.x=e.x;ei.y=e.y;ei.hp=e.hp;ei.maxHp=e.maxHp;ei.distance=e.distance;ei.type=e.type;ctx.npcs.push_back(ei);}
